@@ -12,11 +12,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
 	defaultLibriVoxAPI = "https://librivox.org/api/feed/audiobooks/"
 	requestGap         = 3 * time.Second
+	fallbackSearchTime = 15 * time.Second
 	cacheDuration      = 15 * time.Minute
 	maxResponseBytes   = 4 << 20
 )
@@ -93,22 +95,118 @@ func (c *Client) Search(ctx context.Context, query string) ([]Pair, error) {
 		return nil, fmt.Errorf("search must be between 2 and 100 characters")
 	}
 	key := strings.ToLower(query)
-	records, err := c.fetch(ctx, key, url.Values{
+	records, err := c.searchRecords(ctx, key, query)
+	if err != nil {
+		return nil, err
+	}
+	pairs := pairsForRecords(records)
+	if len(pairs) > 0 {
+		return pairs, nil
+	}
+	fallback := fallbackTitleQuery(query)
+	if fallback == "" {
+		return pairs, nil
+	}
+	fallbackCtx, cancel := context.WithTimeout(ctx, fallbackSearchTime)
+	defer cancel()
+	records, err = c.searchRecords(fallbackCtx, "fallback:"+strings.ToLower(fallback), fallback)
+	if err != nil {
+		return nil, err
+	}
+	for _, pair := range pairsForRecords(records) {
+		if titleContainsQueryTerms(pair.Title, query) {
+			pairs = append(pairs, pair)
+		}
+	}
+	return pairs, nil
+}
+
+func (c *Client) searchRecords(ctx context.Context, key, query string) ([]Record, error) {
+	return c.fetch(ctx, key, url.Values{
 		"title":    []string{query},
 		"format":   []string{"json"},
 		"extended": []string{"1"},
 		"limit":    []string{"20"},
 	})
-	if err != nil {
-		return nil, err
-	}
+}
+
+func pairsForRecords(records []Record) []Pair {
 	pairs := make([]Pair, 0, len(records))
 	for _, record := range records {
 		if pair, ok := ToPair(record); ok {
 			pairs = append(pairs, pair)
 		}
 	}
-	return pairs, nil
+	return pairs
+}
+
+var titleSearchStopWords = map[string]struct{}{
+	"a": {}, "an": {}, "and": {}, "as": {}, "at": {}, "by": {}, "for": {},
+	"from": {}, "in": {}, "into": {}, "of": {}, "on": {}, "or": {}, "the": {},
+	"to": {}, "with": {},
+}
+
+func searchTokens(value string) []string {
+	var tokens []string
+	var word strings.Builder
+	flush := func() {
+		if word.Len() > 0 {
+			tokens = append(tokens, word.String())
+			word.Reset()
+		}
+	}
+	for _, r := range strings.ToLower(value) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			word.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return tokens
+}
+
+// fallbackTitleQuery chooses one distinctive phrase only when an exact
+// multiword title search found no eligible pair. The caller still verifies
+// every meaningful input word in the returned title, avoiding broad matches.
+func fallbackTitleQuery(query string) string {
+	tokens := searchTokens(query)
+	if len(tokens) < 3 {
+		return ""
+	}
+	for i := len(tokens) - 1; i > 0; i-- {
+		if _, stop := titleSearchStopWords[tokens[i]]; stop {
+			continue
+		}
+		if _, stop := titleSearchStopWords[tokens[i-1]]; stop {
+			continue
+		}
+		return tokens[i-1] + " " + tokens[i]
+	}
+	for i := len(tokens) - 1; i >= 0; i-- {
+		if _, stop := titleSearchStopWords[tokens[i]]; !stop && len([]rune(tokens[i])) >= 4 {
+			return tokens[i]
+		}
+	}
+	return ""
+}
+
+func titleContainsQueryTerms(title, query string) bool {
+	titleTokens := make(map[string]bool)
+	for _, token := range searchTokens(title) {
+		titleTokens[token] = true
+	}
+	required := 0
+	for _, token := range searchTokens(query) {
+		if _, stop := titleSearchStopWords[token]; stop {
+			continue
+		}
+		required++
+		if !titleTokens[token] {
+			return false
+		}
+	}
+	return required >= 2
 }
 
 func (c *Client) ByID(ctx context.Context, id string) (Record, error) {

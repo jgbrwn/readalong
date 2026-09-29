@@ -26,7 +26,8 @@ private.
   canonical words to transcript timestamps with a confidence-scored fallback.
 - Search your bookshelf by title or author.
 - Find free, source-linked candidates in LibriVox and Project
-  Gutenberg, then import the recording and EPUB together.
+  Gutenberg by title or distinctive phrase, then import the recording and EPUB
+  together.
 - Read with absolute-time word highlighting, tap-to-seek, playback speed, saved
   position, and per-book appearance/sync settings.
 - Use a private exe.dev-authenticated bookshelf with automatic account

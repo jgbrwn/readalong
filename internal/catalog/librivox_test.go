@@ -173,3 +173,61 @@ func TestSearchRetriesTransientCatalogFailureOnce(t *testing.T) {
 		t.Fatalf("calls=%d pairs=%#v", calls, pairs)
 	}
 }
+
+func TestSearchFallsBackWhenSmallTitleWordsAreMissing(t *testing.T) {
+	var titles []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		title := r.URL.Query().Get("title")
+		titles = append(titles, title)
+		if title == "Anne Green Gables" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Audiobooks could not be found"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response{Books: []Record{{
+			ID: "146", Title: "Anne of Green Gables",
+			URLTextSource: "https://www.gutenberg.org/etext/45",
+			URLZipFile:    "https://archive.org/compress/anne-book/formats=64KBPS%20MP3",
+			URLLibriVox:   "https://librivox.org/anne/",
+		}}})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	pairs, err := client.Search(context.Background(), "Anne Green Gables")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].Title != "Anne of Green Gables" {
+		t.Fatalf("omitted-word query returned %#v", pairs)
+	}
+	if len(titles) != 2 || titles[0] != "Anne Green Gables" || titles[1] != "green gables" {
+		t.Fatalf("unexpected fallback queries: %#v", titles)
+	}
+}
+
+func TestSearchFallbackRejectsTitlesMissingRequestedWords(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("title") == "Anne Green Gables" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Audiobooks could not be found"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response{Books: []Record{{
+			ID: "146", Title: "Green Gables Stories",
+			URLTextSource: "https://www.gutenberg.org/etext/45",
+			URLZipFile:    "https://archive.org/compress/anne-book/formats=64KBPS%20MP3",
+			URLLibriVox:   "https://librivox.org/anne/",
+		}}})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	pairs, err := client.Search(context.Background(), "Anne Green Gables")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf("fallback returned a title missing an input term: %#v", pairs)
+	}
+}
