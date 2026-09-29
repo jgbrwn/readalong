@@ -44,8 +44,10 @@ import form.
   title search; Readalong treats that no-result response as an empty result
   list, not a provider outage. Transient upstream failures get at most one
   retry, still separated by the configured request gap. HTTP 408 and transient
-  5xx responses are retried once; HTTP 429 is returned as rate limiting rather
-  than blindly retried.
+  5xx responses are retried once. HTTP 429 is retried only when the server
+  supplies a `Retry-After` of at most 15 seconds; otherwise it is returned as
+  rate limiting rather than blindly retried. Longer `Retry-After` values on
+  transient failures also suppress the automatic retry.
 - If a full-title query has no eligible pair, Readalong makes one narrower
   trailing-phrase search for multiword queries and only keeps results whose
   title still contains every meaningful search term. This tolerates omitted

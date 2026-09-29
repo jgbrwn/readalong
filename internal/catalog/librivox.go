@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 const (
 	defaultLibriVoxAPI = "https://librivox.org/api/feed/audiobooks/"
 	requestGap         = 3 * time.Second
+	maxRetryAfterWait  = 15 * time.Second
 	fallbackSearchTime = 15 * time.Second
 	cacheDuration      = 15 * time.Minute
 	maxResponseBytes   = 4 << 20
@@ -294,8 +296,9 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 	}
 	var status int
 	var body []byte
+	var retryAfter string
 	for attempt := 0; attempt < 2; attempt++ {
-		status, body, err = c.requestCatalog(ctx, &safeClient, u)
+		status, body, retryAfter, err = c.requestCatalog(ctx, &safeClient, u)
 		if err != nil {
 			if attempt == 0 && ctx.Err() == nil {
 				continue
@@ -319,7 +322,22 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 				return records, nil
 			}
 		}
-		if attempt == 0 && transientCatalogStatus(status) {
+		if attempt == 0 && (transientCatalogStatus(status) || status == http.StatusTooManyRequests) {
+			delay, hasRetryAfter := parseCatalogRetryAfter(retryAfter)
+			if status == http.StatusTooManyRequests && (!hasRetryAfter || delay > maxRetryAfterWait) {
+				return nil, fmt.Errorf("LibriVox catalog is busy; wait a few seconds and try again")
+			}
+			if hasRetryAfter {
+				if delay > maxRetryAfterWait {
+					return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable (HTTP %d)", status)
+				}
+				if delay < c.minRequestGap {
+					delay = c.minRequestGap
+				}
+				if err := waitForCatalogRetry(ctx, delay); err != nil {
+					return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable")
+				}
+			}
 			continue
 		}
 		if status == http.StatusTooManyRequests {
@@ -348,42 +366,78 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 	return append([]Record(nil), records...), nil
 }
 
-func (c *Client) requestCatalog(ctx context.Context, client *http.Client, u *url.URL) (int, []byte, error) {
+func (c *Client) requestCatalog(ctx context.Context, client *http.Client, u *url.URL) (int, []byte, string, error) {
 	if wait := c.minRequestGap - time.Since(c.lastRequest); wait > 0 && !c.lastRequest.IsZero() {
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return 0, nil, ctx.Err()
+			return 0, nil, "", ctx.Err()
 		case <-timer.C:
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return 0, nil, fmt.Errorf("could not create catalog request")
+		return 0, nil, "", fmt.Errorf("could not create catalog request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Readalong/1.0 (paired public-domain catalog)")
 	c.lastRequest = time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return 0, nil, fmt.Errorf("catalog response could not be read")
+		return 0, nil, "", fmt.Errorf("catalog response could not be read")
 	}
 	if len(body) > maxResponseBytes {
-		return 0, nil, fmt.Errorf("catalog response is too large")
+		return 0, nil, "", fmt.Errorf("catalog response is too large")
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, body, resp.Header.Get("Retry-After"), nil
 }
 
 func transientCatalogStatus(status int) bool {
 	return status == http.StatusRequestTimeout ||
 		status >= 500 && status <= 599 &&
 			status != http.StatusNotImplemented && status != http.StatusHTTPVersionNotSupported
+}
+
+func parseCatalogRetryAfter(value string) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0, false
+		}
+		if seconds > int64(maxRetryAfterWait/time.Second) {
+			return maxRetryAfterWait + time.Second, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := time.Until(when)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
+}
+
+func waitForCatalogRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func sameCatalogOrigin(base, target *url.URL) bool {

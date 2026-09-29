@@ -205,7 +205,6 @@ func TestSearchDoesNotRetryCatalogRateLimit(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer server.Close()
@@ -216,6 +215,52 @@ func TestSearchDoesNotRetryCatalogRateLimit(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("rate limit response made %d requests, want 1", calls)
+	}
+}
+
+func TestSearchRetriesCatalogRateLimitWithShortRetryAfter(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response{Books: []Record{{
+			ID: "391", Title: "Gift of the Magi",
+			URLTextSource: "https://www.gutenberg.org/ebooks/7256",
+			URLZipFile:    "https://archive.org/compress/gift-of-the-magi/formats=64KBPS%20MP3",
+			URLLibriVox:   "https://librivox.org/gift-of-the-magi/",
+		}}})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	pairs, err := client.Search(context.Background(), "Gift of the Magi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(pairs) != 1 || pairs[0].RecordID != "391" {
+		t.Fatalf("calls=%d pairs=%#v", calls, pairs)
+	}
+}
+
+func TestSearchDoesNotRetryCatalogLongRetryAfter(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	if _, err := client.Search(context.Background(), "Gift of the Magi"); err == nil {
+		t.Fatal("expected unavailable error")
+	}
+	if calls != 1 {
+		t.Fatalf("long Retry-After made %d requests, want 1", calls)
 	}
 }
 

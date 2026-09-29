@@ -10,7 +10,8 @@
 - LibriVox catalog search returns only records linked to Gutenberg and
   Archive.org sources.
 - LibriVox catalog retries network/HTTP 408/transient 5xx failures once, but
-  does not automatically retry HTTP 429 rate limits.
+  retries HTTP 429 only with a short explicit `Retry-After`; long waits do not
+  trigger automatic retries.
 - LibriVox archive redirects remain on Archive.org hosts and are size limited.
 - Gutenberg EPUB download uses the validated numeric ID and fixed HTTPS mirror
   path; off-host redirects are rejected.
