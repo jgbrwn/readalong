@@ -381,8 +381,9 @@ func (c *Client) requestCatalog(ctx context.Context, client *http.Client, u *url
 }
 
 func transientCatalogStatus(status int) bool {
-	return status >= 500 && status <= 599 &&
-		status != http.StatusNotImplemented && status != http.StatusHTTPVersionNotSupported
+	return status == http.StatusRequestTimeout ||
+		status >= 500 && status <= 599 &&
+			status != http.StatusNotImplemented && status != http.StatusHTTPVersionNotSupported
 }
 
 func sameCatalogOrigin(base, target *url.URL) bool {

@@ -43,7 +43,9 @@ import form.
 - LibriVox returns HTTP 404 with `Audiobooks could not be found` for an empty
   title search; Readalong treats that no-result response as an empty result
   list, not a provider outage. Transient upstream failures get at most one
-  retry, still separated by the configured request gap.
+  retry, still separated by the configured request gap. HTTP 408 and transient
+  5xx responses are retried once; HTTP 429 is returned as rate limiting rather
+  than blindly retried.
 - If a full-title query has no eligible pair, Readalong makes one narrower
   trailing-phrase search for multiword queries and only keeps results whose
   title still contains every meaningful search term. This tolerates omitted
@@ -66,6 +68,13 @@ import form.
   derived from the validated LibriVox record can form this path. Redirects
   must stay on the mirror host. The EPUB is byte-limited and then subjected to
   the same ZIP/spine/path/decompression validation as an uploaded EPUB.
+- Archive.org audio archives, Gutenberg EPUBs, and direct public media get at
+  most one automatic retry for transient connection/stream failures, HTTP 408,
+  or transient 5xx. A 429 is retried only when the server supplies a
+  `Retry-After` of at most 15 seconds; longer delays, permanent 4xx responses,
+  invalid content types, oversize files, and local disk errors are not retried.
+  A failed second attempt leaves no partial download; the user can retry the
+  import from the bookshelf.
 - CORS is not involved in these server-to-server requests. SSRF, redirect
   validation, provider access rules, rights, and size/decompression limits are
   the relevant concerns.

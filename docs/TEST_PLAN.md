@@ -9,9 +9,16 @@
 - YouTube fallback client path.
 - LibriVox catalog search returns only records linked to Gutenberg and
   Archive.org sources.
+- LibriVox catalog retries network/HTTP 408/transient 5xx failures once, but
+  does not automatically retry HTTP 429 rate limits.
 - LibriVox archive redirects remain on Archive.org hosts and are size limited.
 - Gutenberg EPUB download uses the validated numeric ID and fixed HTTPS mirror
   path; off-host redirects are rejected.
+- Archive.org, Gutenberg, and direct media downloads retry transient HTTP
+  failures or interrupted streams once, cap attempts at two, and do not retry
+  permanent HTTP 4xx or invalid media responses.
+- Download retries honor short `Retry-After` values; unbounded/long wait times
+  do not cause an automatic retry.
 - A LibriVox chapter ZIP is path-safe, naturally ordered, and joins to one MP3.
 - A LibriVox no-result 404 displays an empty result state; transient upstream
   failures retry once without violating the request gap.

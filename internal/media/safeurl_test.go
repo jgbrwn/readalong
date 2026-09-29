@@ -5,9 +5,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRejectsNonPublicAddressRanges(t *testing.T) {
@@ -69,6 +72,174 @@ func TestGutenbergEPUBURLUsesFixedMirrorPath(t *testing.T) {
 	for _, id := range []string{"", "../45", "45/../1", "9999999999999"} {
 		if _, _, err := GutenbergEPUBURL(id); err == nil {
 			t.Errorf("accepted Gutenberg ID %q", id)
+		}
+	}
+}
+
+func TestDownloadPublicRetriesTransientServerFailureOnce(t *testing.T) {
+	var calls int
+	payload := []byte("ID3 test audiobook")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "audio.mp3")
+	err = downloadPublicWithClient(context.Background(), u, dest, 1024, parseHTTPURL, isSupportedMediaType, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("transient HTTP failure made %d requests, want 2", calls)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded bytes = %q, want %q", got, payload)
+	}
+	if _, err := os.Stat(dest + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf("partial file remains after successful retry: %v", err)
+	}
+}
+
+func TestDownloadPublicRetriesRateLimitOnlyWithShortRetryAfter(t *testing.T) {
+	var calls int
+	payload := []byte("ID3 rate-limited audiobook")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "audio.mp3")
+	err = downloadPublicWithClient(context.Background(), u, dest, 1024, parseHTTPURL, isSupportedMediaType, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("rate-limited download made %d requests, want 2", calls)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("retried download did not produce media: %v", err)
+	}
+}
+
+func TestDownloadPublicRetriesInterruptedBodyOnce(t *testing.T) {
+	var calls int
+	payload := []byte("complete audiobook")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "audio/mpeg")
+		if calls == 1 {
+			w.Header().Set("Content-Length", "64")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("partial"))
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "audio.mp3")
+	err = downloadPublicWithClient(context.Background(), u, dest, 1024, parseHTTPURL, isSupportedMediaType, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("interrupted body made %d requests, want 2", calls)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded bytes = %q, want %q", got, payload)
+	}
+}
+
+func TestDownloadPublicCapsTransientRetriesAtTwoAttempts(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "temporarily unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = downloadPublicWithClient(context.Background(), u, filepath.Join(t.TempDir(), "audio.mp3"),
+		1024, parseHTTPURL, isSupportedMediaType, server.Client())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("persistent transient response error = %v", err)
+	}
+	if calls != maxDownloadAttempts {
+		t.Fatalf("persistent 502 made %d requests, want %d", calls, maxDownloadAttempts)
+	}
+}
+
+func TestDownloadPublicDoesNotRetryPermanentHTTPFailure(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/missing.epub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = downloadPublicWithClient(context.Background(), u, filepath.Join(t.TempDir(), "book.epub"),
+		1024, parseHTTPURL, isEPUBContentType, server.Client())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("permanent response error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("404 response made %d requests, want 1", calls)
+	}
+}
+
+func TestDownloadRetryAfterPolicyIsBounded(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		retry     string
+		wantRetry bool
+		wantDelay time.Duration
+	}{
+		{status: http.StatusBadGateway, wantRetry: true, wantDelay: downloadRetryDelay},
+		{status: http.StatusTooManyRequests, wantRetry: false},
+		{status: http.StatusTooManyRequests, retry: "2", wantRetry: true, wantDelay: 2 * time.Second},
+		{status: http.StatusServiceUnavailable, retry: "30", wantRetry: false},
+		{status: http.StatusServiceUnavailable, retry: "5", wantRetry: true, wantDelay: 5 * time.Second},
+		{status: http.StatusNotFound, retry: "1", wantRetry: false},
+	} {
+		gotRetry, gotDelay := retryableDownloadStatus(test.status, test.retry)
+		if gotRetry != test.wantRetry || gotRetry && gotDelay != test.wantDelay {
+			t.Errorf("status=%d Retry-After=%q: got (%v, %v), want (%v, %v)",
+				test.status, test.retry, gotRetry, gotDelay, test.wantRetry, test.wantDelay)
 		}
 	}
 }
