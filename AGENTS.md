@@ -17,7 +17,8 @@ Build a private, mobile-first PWA for synchronized audiobook reading:
 - accept uploaded audio, direct public audio URLs, and YouTube URLs;
 - transcribe with Groq and preserve word timestamps;
 - render a calm, lyric-style reader with seeking, playback speed, and saved progress;
-- optionally align audio to EPUB text in a later phase;
+- provide both transcript-only and audio + EPUB aligned reading modes;
+- search the private bookshelf and discover/import source-linked public pairs;
 - use exe.dev proxy identity for private per-user bookshelves.
 
 ## Keep the stack simple

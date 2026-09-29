@@ -18,8 +18,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jgbrwn/readalong/internal/align"
 	"github.com/jgbrwn/readalong/internal/auth"
+	"github.com/jgbrwn/readalong/internal/catalog"
 	"github.com/jgbrwn/readalong/internal/db"
+	"github.com/jgbrwn/readalong/internal/epub"
 	"github.com/jgbrwn/readalong/internal/media"
 	"github.com/jgbrwn/readalong/internal/pipeline"
 	"github.com/jgbrwn/readalong/internal/transcript"
@@ -27,6 +30,7 @@ import (
 
 const (
 	multipartMemoryBytes = 8 << 20
+	maxEPUBBytes         = 150 << 20
 	readerWindowMS       = int64(5 * 60 * 1000)
 	maxReaderWindowMS    = int64(10 * 60 * 1000)
 )
@@ -41,7 +45,7 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "multipart form required", http.StatusBadRequest)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+(8<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+maxEPUBBytes+multipartMemoryBytes)
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -54,13 +58,18 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
-	if len(r.MultipartForm.File["epub_file"]) > 0 {
-		http.Error(w, "EPUB alignment is not available yet; import the audio without the EPUB for now", http.StatusNotImplemented)
+	if r.MultipartForm == nil {
+		http.Error(w, "invalid multipart form", http.StatusBadRequest)
 		return
 	}
 	files := r.MultipartForm.File["audio_file"]
+	epubFiles := r.MultipartForm.File["epub_file"]
 	if len(files) > 1 {
 		http.Error(w, "upload one audio file at a time", http.StatusBadRequest)
+		return
+	}
+	if len(epubFiles) > 1 {
+		http.Error(w, "upload one EPUB at a time", http.StatusBadRequest)
 		return
 	}
 	sourceURL := strings.TrimSpace(r.FormValue("source_url"))
@@ -136,9 +145,57 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	epubRel := ""
+	var ebook epub.Document
+	if len(epubFiles) == 1 {
+		header := epubFiles[0]
+		if header.Size > maxEPUBBytes {
+			_ = os.RemoveAll(bookDir)
+			http.Error(w, "EPUB exceeds the 150 MB size limit", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if header.Size <= 0 || strings.ToLower(filepath.Ext(header.Filename)) != ".epub" {
+			_ = os.RemoveAll(bookDir)
+			http.Error(w, "upload one valid EPUB file", http.StatusBadRequest)
+			return
+		}
+		sourceDir := filepath.Join(bookDir, "source")
+		if err := os.MkdirAll(sourceDir, 0700); err != nil {
+			_ = os.RemoveAll(bookDir)
+			http.Error(w, "could not prepare EPUB upload", http.StatusInternalServerError)
+			return
+		}
+		epubPath := filepath.Join(sourceDir, "book.epub")
+		if err := saveMultipartFile(w, header, epubPath, maxEPUBBytes); err != nil {
+			_ = os.RemoveAll(bookDir)
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "EPUB exceeds the 150 MB size limit", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "could not save uploaded EPUB", http.StatusBadRequest)
+			return
+		}
+		ebook, err = epub.ParseFile(epubPath)
+		if err != nil {
+			_ = os.RemoveAll(bookDir)
+			http.Error(w, "the EPUB is invalid or contains no readable spine text", http.StatusBadRequest)
+			return
+		}
+		epubRel, err = filepath.Rel(s.cfg.DataDir, epubPath)
+		if err != nil {
+			_ = os.RemoveAll(bookDir)
+			http.Error(w, "could not save EPUB metadata", http.StatusInternalServerError)
+			return
+		}
+	}
+	if title == "Untitled" && ebook.Title != "" {
+		title = ebook.Title
+	}
+	author := ebook.Author
 	if err := s.db.CreateBookAndJob(r.Context(), db.NewBook{
-		ID: id, OwnerUserID: u.ID, Title: title, SourceKind: sourceKind,
-		SourceURL: normalizedURL, AudioRelPath: audioRel, JobID: jobID,
+		ID: id, OwnerUserID: u.ID, Title: title, Author: author, SourceKind: sourceKind,
+		SourceURL: normalizedURL, AudioRelPath: audioRel, EpubRelPath: epubRel, JobID: jobID,
 	}); err != nil {
 		_ = os.RemoveAll(bookDir)
 		http.Error(w, "could not create book", http.StatusInternalServerError)
@@ -151,6 +208,86 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 	jsonOut(w, book)
+}
+
+func (s *Server) searchPairs(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		http.Error(w, "paired-book catalog is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	pairs, err := s.catalog.Search(r.Context(), query)
+	if err != nil {
+		status := http.StatusBadGateway
+		if len([]rune(query)) < 2 || len([]rune(query)) > 100 || hasControlChars(query) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	jsonOut(w, pairs)
+}
+
+func (s *Server) importPair(w http.ResponseWriter, r *http.Request) {
+	u, _ := auth.UserFromContext(r.Context())
+	if s.catalog == nil {
+		http.Error(w, "paired-book catalog is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		RightsConfirmed bool `json:"rights_confirmed"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || !req.RightsConfirmed {
+		http.Error(w, "confirm the source rights before importing this pair", http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "confirm the source rights before importing this pair", http.StatusBadRequest)
+		return
+	}
+	record, err := s.catalog.ByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "paired-book source is unavailable; search again and retry", http.StatusBadGateway)
+		return
+	}
+	pair, ok := catalog.ToPair(record)
+	if !ok {
+		http.Error(w, "this record has no supported Gutenberg EPUB pair", http.StatusBadRequest)
+		return
+	}
+	id, err := randomID()
+	if err != nil {
+		http.Error(w, "could not create book", http.StatusInternalServerError)
+		return
+	}
+	jobID, err := randomID()
+	if err != nil {
+		http.Error(w, "could not create book", http.StatusInternalServerError)
+		return
+	}
+	book, err := s.createCatalogBook(r, u.ID, id, jobID, record, pair)
+	if err != nil {
+		http.Error(w, "could not add this paired book", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	jsonOut(w, book)
+}
+
+func (s *Server) createCatalogBook(r *http.Request, ownerID, id, jobID string, record catalog.Record, pair catalog.Pair) (db.Book, error) {
+	author := strings.Join(pair.Authors, ", ")
+	if err := s.db.CreateBookAndJob(r.Context(), db.NewBook{
+		ID: id, JobID: jobID, OwnerUserID: ownerID, Title: record.Title, Author: author,
+		SourceKind: "librivox", SourceURL: record.URLZipFile,
+		GutenbergID: pair.GutenbergID, EbookSourceURL: pair.GutenbergURL,
+	}); err != nil {
+		return db.Book{}, err
+	}
+	return s.db.BookForUser(r.Context(), ownerID, id)
 }
 
 func saveMultipartFile(w http.ResponseWriter, header *multipart.FileHeader, dest string, maxBytes int64) error {
@@ -250,8 +387,17 @@ func (s *Server) reader(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
+	requestedContent := r.URL.Query().Get("content")
+	if requestedContent != "" && requestedContent != "transcript" && requestedContent != "ebook" {
+		http.Error(w, "content must be transcript or ebook", http.StatusBadRequest)
+		return
+	}
 	payload := map[string]any{
 		"book": book, "chapters": chapters, "ready": false, "sentences": []transcript.Sentence{},
+		"has_ebook": book.Mode == "aligned", "content_mode": "transcript",
+		"alignment_pending": book.Mode == "aligned" && book.AlignmentRelPath == "",
+		"alignment_ready":   book.AlignmentRelPath != "",
+		"alignment_quality": book.AlignmentQuality,
 	}
 	if book.TranscriptRelPath == "" {
 		jsonOut(w, payload)
@@ -286,11 +432,38 @@ func (s *Server) reader(w http.ResponseWriter, r *http.Request) {
 	if book.DurationMS > 0 && endMS > book.DurationMS {
 		endMS = book.DurationMS
 	}
+	content := "transcript"
+	chosen := doc
+	if book.Mode == "aligned" && book.AlignmentRelPath != "" {
+		alignmentPath, pathErr := localDataPath(s.cfg.DataDir, book.AlignmentRelPath)
+		if pathErr != nil {
+			http.Error(w, "alignment data unavailable", http.StatusInternalServerError)
+			return
+		}
+		var alignmentDoc align.EbookAlignment
+		if readTranscript(alignmentPath, &alignmentDoc) != nil {
+			http.Error(w, "alignment data unavailable", http.StatusInternalServerError)
+			return
+		}
+		payload["alignment_quality"] = alignmentDoc.Quality
+		useEbook := alignmentDoc.Quality > 0 && (requestedContent == "ebook" ||
+			requestedContent == "" && alignmentDoc.Quality >= 0.75)
+		if useEbook {
+			content = "ebook"
+			chosen = alignmentDoc.Sentences
+			if len(alignmentDoc.Chapters) > 0 {
+				payload["chapters"] = alignmentDoc.Chapters
+			}
+		} else if requestedContent == "ebook" && alignmentDoc.Quality == 0 {
+			payload["alignment_unavailable"] = true
+		}
+	}
 	payload["ready"] = true
 	payload["start_ms"] = startMS
 	payload["end_ms"] = endMS
-	payload["sentences"] = transcript.Window(doc, startMS, endMS)
-	payload["total_sentences"] = len(doc.Sentences)
+	payload["sentences"] = transcript.Window(chosen, startMS, endMS)
+	payload["total_sentences"] = len(chosen.Sentences)
+	payload["content_mode"] = content
 	w.Header().Set("Cache-Control", "private, no-store")
 	jsonOut(w, payload)
 }

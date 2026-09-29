@@ -17,6 +17,7 @@ let animationFrame = 0;
 let saveTimer = 0;
 let progressRetryTimer = 0;
 let ready = false;
+let readerMode = 'transcript';
 let savedAppearance = { font_size: 1.35, theme: 'light', highlight_mode: 'word' };
 
 async function api(path, options = {}) {
@@ -81,6 +82,8 @@ async function loadBook() {
   $('#bookAuthor').textContent = book.author || '';
   $('#totalTime').textContent = formatTime(book.duration_ms / 1000);
   $('#seek').max = String(book.duration_ms / 1000 || 0);
+  readerMode = book.mode === 'aligned' && Number(book.alignment_quality) >= 0.75 ? 'ebook' : 'transcript';
+  updateModeToggle(book);
 
   try {
     const appearance = JSON.parse(book.appearance_json || '{}');
@@ -111,7 +114,12 @@ async function loadWindow(atMS) {
   const end = start + windowLength;
   setStatus('Loading words…');
   try {
-    const data = await api(`/api/books/${encodeURIComponent(bookID)}/reader?start_ms=${start}&end_ms=${end}`);
+    const query = new URLSearchParams({
+      start_ms: String(start),
+      end_ms: String(end),
+      content: readerMode,
+    });
+    const data = await api(`/api/books/${encodeURIComponent(bookID)}/reader?${query}`);
     if (request !== requestSequence) return;
     if (!data.ready) {
       ready = false;
@@ -120,6 +128,8 @@ async function loadWindow(atMS) {
       return;
     }
     book = data.book;
+    readerMode = data.content_mode || readerMode;
+    updateModeToggle(book);
     chapters = data.chapters || chapters;
     const sentences = data.sentences || [];
     windowStart = sentences[0]?.start_ms ?? data.start_ms;
@@ -127,7 +137,16 @@ async function loadWindow(atMS) {
     renderSentences(sentences);
     ready = true;
     showError(book.error || '');
-    setStatus(book.stage === 'transcribing' ? 'Ready · more words on the way' : 'Ready to read');
+    if (readerMode === 'ebook') {
+      const quality = Number(data.alignment_quality ?? book.alignment_quality) || 0;
+      setStatus(quality >= 0.9 ? 'Ebook text · strong match' : 'Ebook text · partial match');
+    } else if (book.mode === 'aligned' && data.alignment_pending) {
+      setStatus('Transcript ready · aligning ebook');
+    } else if (book.mode === 'aligned' && Number(book.alignment_quality) < 0.75) {
+      setStatus('Transcript · low text match');
+    } else {
+      setStatus(book.stage === 'transcribing' ? 'Ready · more words on the way' : 'Ready to read');
+    }
     enablePlayer();
     updateChapter();
     updateHighlight();
@@ -148,6 +167,14 @@ function statusLabel(value) {
   return 'Preparing first section…';
 }
 
+function updateModeToggle(value = book) {
+  const button = $('#readerModeToggle');
+  const hasEbook = value?.mode === 'aligned' && Number(value.alignment_quality) > 0;
+  button.hidden = !hasEbook;
+  button.textContent = readerMode === 'ebook' ? 'Show transcript' : 'Show EPUB';
+  button.setAttribute('aria-label', readerMode === 'ebook' ? 'Show audio transcript' : 'Show ebook text');
+}
+
 function renderSentences(sentences) {
   const root = $('#readerText');
   root.replaceChildren();
@@ -156,25 +183,43 @@ function renderSentences(sentences) {
   activeWord = -1;
   activeSentence = -1;
   lastScrolledSentence = -1;
-  for (const sentence of sentences) {
-    const paragraph = document.createElement('p');
-    paragraph.className = 'reader-sentence';
-    paragraph.dataset.sentenceId = sentence.id;
+  let paragraph;
+  let previousParagraphID = null;
+  for (const [sentenceOrdinal, sentence] of sentences.entries()) {
+    const paragraphID = sentence.paragraph_id || sentence.id;
+    if (!paragraph || paragraphID !== previousParagraphID) {
+      paragraph = document.createElement('p');
+      paragraph.className = 'reader-paragraph';
+      root.append(paragraph);
+      previousParagraphID = paragraphID;
+    }
+    const sentenceElement = document.createElement('span');
+    sentenceElement.className = 'reader-sentence';
+    sentenceElement.dataset.sentenceId = sentence.id;
     const sentenceIndex = activeSentences.length;
-    activeSentences.push(paragraph);
+    activeSentences.push(sentenceElement);
     for (const [index, word] of sentence.words.entries()) {
-      if (index) paragraph.append(document.createTextNode(' '));
+      if (index) sentenceElement.append(document.createTextNode(' '));
       const span = document.createElement('span');
       span.className = 'reader-word';
       span.textContent = word.t;
-      span.dataset.start = String(word.s);
-      span.dataset.end = String(word.e);
-      span.dataset.wordIndex = String(activeWords.length);
-      span.dataset.sentenceIndex = String(sentenceIndex);
-      activeWords.push({ start: word.s, end: word.e, element: span, sentenceIndex });
-      paragraph.append(span);
+      const start = Number(word.s);
+      const end = Number(word.e);
+      const confidence = Number(word.c) || 0;
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start && confidence >= 0.65) {
+        span.dataset.start = String(start);
+        span.dataset.end = String(end);
+        span.dataset.wordIndex = String(activeWords.length);
+        span.dataset.sentenceIndex = String(sentenceIndex);
+        activeWords.push({ start, end, element: span, sentenceIndex });
+      }
+      sentenceElement.append(span);
     }
-    root.append(paragraph);
+    paragraph.append(sentenceElement);
+    if (sentenceOrdinal + 1 < sentences.length &&
+        (sentences[sentenceOrdinal + 1].paragraph_id || sentences[sentenceOrdinal + 1].id) === paragraphID) {
+      paragraph.append(document.createTextNode(' '));
+    }
   }
 }
 
@@ -323,6 +368,7 @@ function connectProgress() {
     }
     if (data.job_status === 'completed' || data.job_status === 'error') {
       stream.close();
+      if (data.job_status === 'completed' && book?.mode === 'aligned') refreshBookMode();
     } else if (data.stage === 'rate_limited') {
       stream.close();
       const retryAt = Date.parse(data.not_before_at || '');
@@ -334,6 +380,19 @@ function connectProgress() {
     }
   });
   stream.onerror = () => {};
+}
+
+async function refreshBookMode() {
+  try {
+    const result = await api(`/api/books/${encodeURIComponent(bookID)}`);
+    book = result.book;
+    chapters = result.chapters || chapters;
+    readerMode = Number(book.alignment_quality) >= 0.75 ? 'ebook' : 'transcript';
+    updateModeToggle(book);
+    await loadWindow(Math.max(0, Math.round(audio.currentTime * 1000)));
+  } catch (error) {
+    console.warn('Could not refresh paired ebook status:', error.message);
+  }
 }
 
 async function retry() {
@@ -354,6 +413,12 @@ $('#playPause').addEventListener('click', async () => {
   } else {
     audio.pause();
   }
+});
+$('#readerModeToggle').addEventListener('click', () => {
+  if (book?.mode !== 'aligned') return;
+  readerMode = readerMode === 'ebook' ? 'transcript' : 'ebook';
+  updateModeToggle(book);
+  loadWindow(Math.max(0, Math.round(audio.currentTime * 1000)));
 });
 $('#back15').addEventListener('click', () => { audio.currentTime = Math.max(0, audio.currentTime - 15); });
 $('#forward30').addEventListener('click', () => { audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30); });

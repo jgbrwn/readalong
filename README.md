@@ -22,18 +22,27 @@ private.
 - Import YouTube audio without cookies, or fetch a direct public HTTP(S) media URL.
 - Transcribe in resumable chunks with Groq word timestamps; keep completed work
   when rate-limited.
+- Upload an audiobook and EPUB together; reflow the EPUB spine and align its
+  canonical words to transcript timestamps with a confidence-scored fallback.
+- Search your bookshelf by title or author.
+- Find free, source-linked candidates in LibriVox and Project
+  Gutenberg, then import the recording and EPUB together.
 - Read with absolute-time word highlighting, tap-to-seek, playback speed, saved
   position, and per-book appearance/sync settings.
 - Use a private exe.dev-authenticated bookshelf with automatic account
   provisioning and server-side ownership checks.
 - Install as a PWA; the web app and its media service remain on one VM.
 
-**Current boundary:** audio-only transcript reading is implemented. The
-planned second reading mode pairs audio with an EPUB, displays the ebook's
-actual text, and quality-gates word/sentence/transcript fallbacks. EPUB
-extraction/alignment and R2/Litestream backup/restore are not implemented yet.
-Generic yt-dlp webpage extraction is also not enabled; use YouTube URLs or
-direct media URLs for now.
+**Alignment caveat:** Readalong can now extract EPUB text and align it against
+the audiobook transcript. Pair discovery confirms that sources are linked; it
+does not guarantee an identical edition. When text match confidence is low,
+the reader defaults to the transcript and never animates untimed ebook words.
+This first EPUB implementation still needs validation across varied real
+editions. R2/Litestream backup/restore is not implemented yet. Generic yt-dlp
+webpage extraction is also not enabled; use YouTube URLs, direct media URLs,
+or the paired-book discovery results for now. Source-linked listings are not a
+worldwide rights guarantee; verify the particular recording, text, and
+translation for your use.
 
 ## Stack
 
@@ -56,7 +65,9 @@ Audio, transcripts, SQLite state, and progress are stored under `APP_DATA_DIR`
 on the VM. Audio chunks are sent to Groq for transcription. By default, media
 and database files remain local; optional R2 backup requires separate,
 bucket-scoped credentials. API ownership is keyed by the exe.dev stable user
-ID, not by email.
+ID, not by email. Selecting a paired-catalog result causes the server to fetch
+its public LibriVox archive and Project Gutenberg EPUB into that user's private
+library; neither provider is contacted until the user requests an import.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and

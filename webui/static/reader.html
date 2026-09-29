@@ -17,11 +17,14 @@
       <span id="bookAuthor" class="reader-author"></span>
       <span id="chapterTitle" class="reader-chapter"></span>
     </div>
-    <span id="readerStatus" class="reader-chapter" role="status">Loading…</span>
+    <div class="reader-actions">
+      <button id="readerModeToggle" class="button button-quiet" type="button" hidden>Show EPUB</button>
+      <span id="readerStatus" class="reader-chapter" role="status">Loading…</span>
+    </div>
   </header>
   <main class="reader-main">
     <div id="readerError" class="reader-error" hidden></div>
-    <div id="readerText" class="reader-text" aria-label="Audiobook transcript"></div>
+    <div id="readerText" class="reader-text" aria-label="Synchronized transcript or ebook text"></div>
   </main>
   <section class="player-dock" aria-label="Audio controls">
     <div class="player-inner">

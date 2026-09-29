@@ -1,0 +1,123 @@
+package catalog
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+)
+
+func TestSearchReturnsOnlyLibriVoxGutenbergPairs(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("title") != "Anne of Green Gables" ||
+			r.URL.Query().Get("format") != "json" ||
+			r.URL.Query().Get("extended") != "1" || r.URL.Query().Get("limit") != "20" {
+			t.Errorf("unexpected catalog query: %s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(Response{Books: []Record{
+			{
+				ID: "146", Title: "Anne of Green Gables", Language: "English",
+				URLTextSource: "https://www.gutenberg.org/etext/45",
+				URLZipFile:    "https://archive.org/compress/anne_book/formats=64KBPS%20MP3%26file=%2Fbook.zip",
+				URLLibriVox:   "https://librivox.org/anne/",
+				TotalTimeSecs: 37811,
+				Authors:       []Author{{FirstName: "Lucy Maud", LastName: "Montgomery"}},
+			},
+			{
+				ID: "147", Title: "No paired text",
+				URLTextSource: "https://example.org/text",
+				URLZipFile:    "https://archive.org/download/book.zip",
+				URLLibriVox:   "https://librivox.org/book/",
+			},
+		}})
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	client.BaseURL, client.HTTP = server.URL, server.Client()
+	pairs, err := client.Search(context.Background(), "Anne of Green Gables")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].RecordID != "146" || pairs[0].GutenbergID != "45" ||
+		pairs[0].GutenbergURL != "https://www.gutenberg.org/ebooks/45" || pairs[0].DurationMS != 37811000 {
+		t.Fatalf("unexpected pairs: %#v", pairs)
+	}
+	if calls != 1 {
+		t.Fatalf("catalog calls = %d", calls)
+	}
+	if _, err := client.ByID(context.Background(), "146"); err != nil {
+		t.Fatalf("cached catalog record should be reusable: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("record import triggered another query: %d calls", calls)
+	}
+}
+
+func TestCatalogRejectsOffHostRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("off-host redirect was followed")
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	client.BaseURL, client.HTTP = server.URL, server.Client()
+	if _, err := client.Search(context.Background(), "some title"); err == nil {
+		t.Fatal("expected redirect response to be rejected")
+	}
+}
+
+func TestToPairRejectsUntrustedSources(t *testing.T) {
+	record := Record{
+		ID: "12", Title: "Example",
+		URLTextSource: "https://www.gutenberg.org/ebooks/34",
+		URLZipFile:    "https://archive.org/compress/example/formats=64KBPS%20MP3",
+		URLLibriVox:   "https://librivox.org/example/",
+	}
+	if _, ok := ToPair(record); !ok {
+		t.Fatal("valid source pair rejected")
+	}
+	record.URLZipFile = "https://archive.org.attacker.invalid/compress/example"
+	if _, ok := ToPair(record); ok {
+		t.Fatal("archive URL with a lookalike host accepted")
+	}
+	record.URLZipFile = "https://archive.org/compress/example"
+	record.URLTextSource = "https://www.gutenberg.org.evil.invalid/ebooks/34"
+	if _, ok := ToPair(record); ok {
+		t.Fatal("Gutenberg URL with a lookalike host accepted")
+	}
+}
+
+func TestGutenbergIDOnlyAcceptsCanonicalNumericPaths(t *testing.T) {
+	for _, raw := range []string{"https://www.gutenberg.org/ebooks/1?format=html", "http://www.gutenberg.org/etext/3", "https://evil.invalid/ebooks/2"} {
+		if _, ok := gutenbergID(raw); ok {
+			t.Errorf("accepted non-canonical text source %q", raw)
+		}
+	}
+	if id, ok := gutenbergID("https://www.gutenberg.org/etext/45"); !ok || id != "45" {
+		t.Fatalf("ID = %q, ok=%v", id, ok)
+	}
+}
+
+func TestSearchRequiresBoundedQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(Response{})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP = server.URL, server.Client()
+	if _, err := client.Search(context.Background(), "x"); err == nil {
+		t.Fatal("one-character query accepted")
+	}
+	if _, err := client.Search(context.Background(), "a"+url.QueryEscape("b")); err != nil {
+		t.Fatalf("valid query rejected: %v", err)
+	}
+}

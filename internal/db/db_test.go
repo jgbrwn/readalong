@@ -80,6 +80,40 @@ func TestUserStatusAndBookShelfMetadata(t *testing.T) {
 	}
 }
 
+func TestShelfSearchIsOwnerScopedAndMatchesTitleOrAuthor(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "search-owner", "one@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UpsertUser(ctx, "other-owner", "two@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, book := range []struct{ id, owner, title, author string }{
+		{"one", "search-owner", "Moby-Dick", "Herman Melville"},
+		{"two", "search-owner", "Middlemarch", "George Eliot"},
+		{"private", "other-owner", "Moby-Dick", "Herman Melville"},
+	} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO books(id,owner_user_id,title,author,created_at,updated_at)
+			VALUES(?,?,?,?,?,?)`, book.id, book.owner, book.title, book.author, "2026-01-01", "2026-01-01"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for query, want := range map[string]string{"moby": "one", "ELIOT": "two", "%": ""} {
+		books, err := d.SearchBooksForUser(ctx, "search-owner", query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want == "" {
+			if len(books) != 0 {
+				t.Fatalf("query %q matched unexpectedly: %#v", query, books)
+			}
+		} else if len(books) != 1 || books[0].ID != want {
+			t.Fatalf("query %q results = %#v; want %s", query, books, want)
+		}
+	}
+}
+
 func TestOpenMigratesOlderUsersTable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.db")
@@ -90,7 +124,15 @@ func TestOpenMigratesOlderUsersTable(t *testing.T) {
 	_, err = sqlDB.Exec(`CREATE TABLE users (
 		id TEXT PRIMARY KEY, email TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
 	);
-	INSERT INTO users VALUES('old-id','old@example.org','2020-01-01','2020-01-01')`)
+	INSERT INTO users VALUES('old-id','old@example.org','2020-01-01','2020-01-01');
+	CREATE TABLE books (
+		id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+		author TEXT NOT NULL DEFAULT '', source_kind TEXT NOT NULL DEFAULT '', source_url TEXT,
+		mode TEXT NOT NULL DEFAULT 'transcript', status TEXT NOT NULL DEFAULT 'queued',
+		duration_ms INTEGER NOT NULL DEFAULT 0, audio_relpath TEXT, epub_relpath TEXT,
+		transcript_relpath TEXT, alignment_relpath TEXT, alignment_quality REAL,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+	)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,5 +150,26 @@ func TestOpenMigratesOlderUsersTable(t *testing.T) {
 	}
 	if user.Role != "user" || user.Status != "active" {
 		t.Fatalf("legacy account defaults incorrect: %#v", user)
+	}
+	for _, column := range []string{"ebook_json_relpath", "gutenberg_id", "ebook_source_url"} {
+		var found bool
+		rows, err := d.Query(`PRAGMA table_info(books)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, typ string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			found = found || name == column
+		}
+		_ = rows.Close()
+		if !found {
+			t.Errorf("migration did not add books.%s", column)
+		}
 	}
 }

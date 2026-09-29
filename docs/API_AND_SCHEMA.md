@@ -21,12 +21,14 @@
 - `id TEXT PRIMARY KEY`
 - `owner_user_id TEXT NOT NULL`
 - `title`, `author`
-- `source_kind` — upload/youtube/url
+- `source_kind` — upload/youtube/url/librivox
 - `source_url` nullable
-- `mode` — transcript (aligned is a planned EPUB phase)
+- `mode` — transcript/aligned
 - `status` — queued/acquiring/transcribing/ready/error
 - `duration_ms`
-- `audio_relpath`, `epub_relpath`, `transcript_relpath`, `alignment_relpath`
+- `audio_relpath`, `epub_relpath`, `ebook_json_relpath`,
+  `transcript_relpath`, `alignment_relpath`
+- `gutenberg_id`, `ebook_source_url`, `alignment_quality`
 - `alignment_quality` nullable
 - timestamps
 
@@ -75,15 +77,17 @@ All `/api/*` routes require exe.dev identity except `/api/health`.
 
 ```text
 GET    /api/me
-GET    /api/books
+GET    /api/books?q=title-or-author
 POST   /api/books                  multipart import
 GET    /api/books/:id
 DELETE /api/books/:id
-GET    /api/books/:id/reader
+GET    /api/books/:id/reader       transcript/ebook window; content=transcript|ebook
 GET    /api/books/:id/audio        Range-capable local media response
 GET    /api/books/:id/events       SSE processing progress
 PUT    /api/books/:id/progress
 POST   /api/books/:id/retry
+GET    /api/discovery/pairs?q=title
+POST   /api/discovery/pairs/:id/import
 GET    /api/admin/users           admin only
 PUT    /api/admin/users/:user_id  admin only; update active/suspended status
 ```
@@ -103,20 +107,41 @@ Multipart fields:
 
 - `source_url` optional
 - `audio_file` optional
+- `epub_file` optional
 - `title` optional
 
-Exactly one of `source_url` or `audio_file` is required. The `epub_file` field is reserved for the planned second mode.
-
-EPUB upload is not enabled yet; including an `epub_file` currently returns
-`501 Not Implemented`. EPUB alignment is the planned second reading mode.
+Exactly one of `source_url` or `audio_file` is required. An `epub_file` may be
+provided alongside either audio source to create an aligned-mode book. The
+EPUB must be a valid spine-based file smaller than 150 MiB; archives are
+validated for path traversal and decompression limits.
 Response `202` immediately returns the queued book; ingestion runs in a persisted
 background job.
+
+### GET /api/discovery/pairs
+
+Searches a throttled, cached LibriVox API query. Results are returned only when
+the record links to a Project Gutenberg text source and an Archive.org audio
+archive. The API exposes canonical Gutenberg page URLs and LibriVox detail
+URLs, never the archive download URL.
+
+### POST /api/discovery/pairs/:id/import
+
+JSON body: `{"rights_confirmed":true}`. The server re-fetches the LibriVox
+record by numeric ID, downloads its chapter ZIP from Archive.org, downloads
+the matching Gutenberg EPUB from the fixed Project Gutenberg mirror path,
+then imports both into the caller's private shelf. No user-provided network
+URL is accepted by this endpoint. The UI warns that linked records may still
+refer to different editions/translations and asks the user to confirm rights.
 
 ### GET /api/books/:id/reader
 
 Returns metadata, chapters, and a compact transcript window selected by
-`?start_ms=` / `?end_ms=`. The reader fetches the active window rather than
-mounting an entire audiobook transcript in the DOM.
+`?start_ms=` / `?end_ms=`. Aligned books accept `content=transcript` or
+`content=ebook`; the default uses canonical EPUB words only when alignment
+coverage is at least 75%, otherwise it shows the audio transcript. Unmatched
+ebook words have no timestamps and are never given a moving word highlight.
+The reader fetches the active window rather than mounting an entire book in
+the DOM.
 
 ### GET /api/books/:id/audio
 

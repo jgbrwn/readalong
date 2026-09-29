@@ -7,6 +7,12 @@
 - Direct MP3 URL.
 - YouTube normal video/audiobook URL without cookies or yt-dlp config.
 - YouTube fallback client path.
+- LibriVox catalog search returns only records linked to Gutenberg and
+  Archive.org sources.
+- LibriVox archive redirects remain on Archive.org hosts and are size limited.
+- Gutenberg EPUB download uses the validated numeric ID and fixed HTTPS mirror
+  path; off-host redirects are rejected.
+- A LibriVox chapter ZIP is path-safe, naturally ordered, and joins to one MP3.
 - Public media URL redirecting to a private IP is rejected.
 - Bad/404 URL.
 - URL resolving to localhost/private IP is rejected for direct HTTP fetch.
@@ -34,6 +40,9 @@
 
 ## EPUB alignment
 
+- Audio + local EPUB upload produces aligned mode and a reflowable reader.
+- Catalog import fetches both public sources and creates an owner-scoped book.
+- Exact matching text aligns; expected hints reach the Groq request.
 - Exact matching edition.
 - Small punctuation differences.
 - Narrator intro not present in ebook.
@@ -41,6 +50,13 @@
 - ASR misspells a character name.
 - Audiobook chapter and ebook chapter boundaries do not match.
 - Deliberately wrong ebook: quality gates must prevent false word-precision.
+- Low coverage defaults to transcript mode; user can view EPUB text without
+  false moving highlights on unmatched words.
+
+## Bookshelf search
+
+- Search matches title and author without returning another user's books.
+- Empty results and clearing the query remain usable on mobile.
 
 ## Auth
 

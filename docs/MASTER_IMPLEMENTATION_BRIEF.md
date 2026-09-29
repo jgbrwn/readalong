@@ -7,7 +7,9 @@ Create a private web/PWA reader that combines the best ideas from HushBook/Spokt
 - import an audiobook file, a direct audio/web URL, or a YouTube link;
 - remotely transcribe with Groq rather than making the phone do ASR;
 - play audio with lyric-style synchronized words;
-- optionally pair an EPUB and align the narration to the actual ebook text;
+- pair audio with EPUB text and align the narration to the canonical ebook words;
+- discover/import free, source-linked LibriVox + Project Gutenberg pairs;
+- search a user's private bookshelf by title or author;
 - maintain a private exe.dev-authenticated bookshelf.
 
 ## Phase 0 — bootstrap and verify
@@ -44,13 +46,19 @@ Prioritize the first chunk so the user can start reading before the whole book h
 
 Exit criterion: YouTube audiobook -> ready first section -> stable word highlighting on phone and desktop.
 
-## Phase 2 — EPUB aligned mode
+## Phase 2 — EPUB aligned mode and paired discovery
 
-Implement EPUB spine extraction and the alignment stages in `SYNC_AND_ALIGNMENT.md`.
+Implemented first pass: EPUB spine extraction, quality-scored sentence-local
+alignment, dual-mode reader, source-linked pair discovery, and owner-scoped
+book search. Continue validating against real editions before calling Phase 2
+complete. Details are in `SYNC_AND_ALIGNMENT.md` and
+`PAIRED_CATALOG.md`.
 
 Start with a clean reflowed representation of publisher text. Do not get stuck preserving arbitrary EPUB styling.
 
-Add confidence metrics and fallback behavior before calling this mode done.
+Confidence metrics and fallback are implemented in the first pass; validate
+them on real matching and intentionally mismatched editions before calling
+this mode done.
 
 Exit criterion: matching EPUB+audiobook displays ebook text and stays aligned across seeks/chapter boundaries; intentionally mismatched inputs fail safely.
 
@@ -73,7 +81,6 @@ Exit criterion: delete a disposable local test library, restore DB + assets from
 - cover extraction;
 - chapter navigation;
 - typography/theme controls;
-- search;
 - bookmarks/quotes;
 - processed-source cleanup policy;
 - optional offline-download mode;

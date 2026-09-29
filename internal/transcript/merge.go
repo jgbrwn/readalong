@@ -114,7 +114,7 @@ func sentences(words []TimedWord) []Sentence {
 			return
 		}
 		out = append(out, Sentence{
-			ID: "s" + itoa(len(out)+1), StartMS: start, EndMS: end,
+			ID: "s" + itoa(len(out)+1), ParagraphID: "s" + itoa(len(out)+1), StartMS: start, EndMS: end,
 			Words: append([]Word(nil), current...),
 		})
 		current = nil

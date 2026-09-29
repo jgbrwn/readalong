@@ -57,6 +57,45 @@ func TestParseHTTPURL(t *testing.T) {
 	}
 }
 
+func TestGutenbergEPUBURLUsesFixedMirrorPath(t *testing.T) {
+	got, path, err := GutenbergEPUBURL("45")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://gutenberg.pglaf.org/cache/epub/45/pg45.epub" ||
+		path != "/cache/epub/45/pg45.epub" {
+		t.Fatalf("Gutenberg URL/path = %q %q", got, path)
+	}
+	for _, id := range []string{"", "../45", "45/../1", "9999999999999"} {
+		if _, _, err := GutenbergEPUBURL(id); err == nil {
+			t.Errorf("accepted Gutenberg ID %q", id)
+		}
+	}
+}
+
+func TestLibriVoxArchiveURLIsLimitedToArchiveOrg(t *testing.T) {
+	for _, raw := range []string{
+		"https://archive.org/compress/book/formats=64KBPS%20MP3",
+		"https://ia801.us.archive.org/download/book.zip",
+		"https://dn801702.us.archive.org/zip_dir.php?path=%2F0%2Fitems%2Fbook.zip&formats=64KBPS%20MP3",
+	} {
+		if _, err := validateLibriVoxArchiveURL(raw); err != nil {
+			t.Errorf("rejected valid archive URL %q: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"https://archive.org.attacker.invalid/compress/book.zip",
+		"http://archive.org/compress/book.zip",
+		"https://archive.org/metadata/book",
+		"https://dn801702.us.archive.org/zip_dir.php?path=%2F0%2Fitems%2Fbook.txt&formats=64KBPS%20MP3",
+		"https://example.com/download/book.zip",
+	} {
+		if _, err := validateLibriVoxArchiveURL(raw); err == nil {
+			t.Errorf("accepted unsupported archive URL %q", raw)
+		}
+	}
+}
+
 func TestIsYouTubeURL(t *testing.T) {
 	for _, raw := range []string{
 		"https://youtube.com/watch?v=x", "https://www.youtube.com/watch?v=x",

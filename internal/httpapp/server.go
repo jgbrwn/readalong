@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jgbrwn/readalong/internal/auth"
+	"github.com/jgbrwn/readalong/internal/catalog"
 	"github.com/jgbrwn/readalong/internal/config"
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/pipeline"
@@ -19,11 +20,20 @@ type Server struct {
 	cfg      config.Config
 	db       *db.DB
 	pipeline *pipeline.Service
+	catalog  *catalog.Client
 	mux      *http.ServeMux
 }
 
 func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler {
+	return NewWithCatalog(cfg, d, catalog.NewClient(), workers...)
+}
+
+func NewWithCatalog(cfg config.Config, d *db.DB, catalogClient *catalog.Client, workers ...*pipeline.Service) http.Handler {
+	if catalogClient == nil {
+		catalogClient = catalog.NewClient()
+	}
 	s := &Server{cfg: cfg, db: d, mux: http.NewServeMux()}
+	s.catalog = catalogClient
 	if len(workers) > 0 {
 		s.pipeline = workers[0]
 	}
@@ -36,6 +46,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/me", s.me)
 	s.mux.HandleFunc("GET /api/books", s.books)
 	s.mux.HandleFunc("POST /api/books", s.createBook)
+	s.mux.HandleFunc("GET /api/discovery/pairs", s.searchPairs)
+	s.mux.HandleFunc("POST /api/discovery/pairs/{id}/import", s.importPair)
 	s.mux.HandleFunc("GET /api/books/{id}", s.getBook)
 	s.mux.HandleFunc("DELETE /api/books/{id}", s.deleteBook)
 	s.mux.HandleFunc("GET /api/books/{id}/reader", s.reader)
@@ -150,7 +162,12 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) books(w http.ResponseWriter, r *http.Request) {
 	u, _ := auth.UserFromContext(r.Context())
-	b, err := s.db.BooksForUser(r.Context(), u.ID)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len([]rune(query)) > 100 || hasControlChars(query) {
+		http.Error(w, "search query is too long or invalid", http.StatusBadRequest)
+		return
+	}
+	b, err := s.db.SearchBooksForUser(r.Context(), u.ID, query)
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return

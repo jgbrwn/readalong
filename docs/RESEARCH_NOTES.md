@@ -4,6 +4,8 @@ Provider models, upload limits, pricing, and rate limits change. Treat this
 document as historical context and verify the linked primary documentation
 before depending on a numeric limit. The application does not hard-code Groq
 quotas; it persists `Retry-After` backpressure and resumes incomplete work.
+Paired-catalog research was updated September 29, 2026 in
+[`PAIRED_CATALOG.md`](PAIRED_CATALOG.md).
 
 Primary references:
 

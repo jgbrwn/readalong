@@ -17,7 +17,67 @@ import (
 // DownloadURL fetches a direct media URL without using proxy environment
 // variables and pins each connection to an address verified as public.
 func DownloadURL(ctx context.Context, rawURL, dest string, maxBytes int64) error {
-	u, err := parseHTTPURL(rawURL)
+	return downloadPublic(ctx, rawURL, dest, maxBytes, parseHTTPURL, isSupportedMediaType)
+}
+
+func DownloadLibriVoxArchive(ctx context.Context, rawURL, dest string, maxBytes int64) error {
+	return downloadPublic(ctx, rawURL, dest, maxBytes, validateLibriVoxArchiveURL, isZipContentType)
+}
+
+func DownloadGutenbergEPUB(ctx context.Context, id, dest string, maxBytes int64) error {
+	target, expectedPath, err := GutenbergEPUBURL(id)
+	if err != nil {
+		return err
+	}
+	validate := func(raw string) (*url.URL, error) {
+		u, err := parseHTTPURL(raw)
+		if err != nil || u.Scheme != "https" || u.Hostname() != "gutenberg.pglaf.org" ||
+			u.Path != expectedPath || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("unsupported Project Gutenberg EPUB URL")
+		}
+		return u, nil
+	}
+	return downloadPublic(ctx, target, dest, maxBytes, validate, isEPUBContentType)
+}
+
+func GutenbergEPUBURL(id string) (string, string, error) {
+	if !digitsOnly(id) || len(id) > 12 {
+		return "", "", fmt.Errorf("invalid Project Gutenberg ID")
+	}
+	expectedPath := "/cache/epub/" + id + "/pg" + id + ".epub"
+	return "https://gutenberg.pglaf.org" + expectedPath, expectedPath, nil
+}
+
+func validateLibriVoxArchiveURL(raw string) (*url.URL, error) {
+	u, err := parseHTTPURL(raw)
+	if err != nil || u.Scheme != "https" || !isArchiveHost(u.Hostname()) {
+		return nil, fmt.Errorf("unsupported LibriVox archive URL")
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if strings.HasPrefix(u.Path, "/compress/") &&
+		(host == "archive.org" || host == "www.archive.org") && u.RawQuery == "" {
+		return u, nil
+	}
+	if strings.HasPrefix(u.Path, "/download/") && u.RawQuery == "" {
+		return u, nil
+	}
+	if u.Path == "/zip_dir.php" && strings.HasSuffix(host, ".archive.org") {
+		query := u.Query()
+		archivePath := query.Get("path")
+		format := query.Get("formats")
+		if strings.HasPrefix(archivePath, "/0/items/") &&
+			strings.HasSuffix(strings.ToLower(archivePath), ".zip") && strings.Contains(format, "MP3") {
+			return u, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported LibriVox archive URL")
+}
+
+type urlValidator func(string) (*url.URL, error)
+type contentTypeValidator func(string) bool
+
+func downloadPublic(ctx context.Context, rawURL, dest string, maxBytes int64, validate urlValidator, accepts contentTypeValidator) error {
+	u, err := validate(rawURL)
 	if err != nil {
 		return err
 	}
@@ -37,8 +97,11 @@ func DownloadURL(ctx context.Context, rawURL, dest string, maxBytes int64) error
 			if len(via) >= 5 {
 				return fmt.Errorf("too many redirects")
 			}
-			if _, err := parseHTTPURL(req.URL.String()); err != nil {
+			if _, err := validate(req.URL.String()); err != nil {
 				return err
+			}
+			if req.URL.Path == "/zip_dir.php" && isArchiveHost(req.URL.Hostname()) {
+				req.URL.RawQuery = strings.ReplaceAll(req.URL.RawQuery, " ", "+")
 			}
 			return nil
 		},
@@ -62,7 +125,7 @@ func DownloadURL(ctx context.Context, rawURL, dest string, maxBytes int64) error
 	if resp.ContentLength > maxBytes {
 		return fmt.Errorf("media download exceeds the configured size limit")
 	}
-	if !isSupportedMediaType(resp.Header.Get("Content-Type")) {
+	if !accepts(resp.Header.Get("Content-Type")) {
 		return fmt.Errorf("URL did not return an audio or supported media file")
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
@@ -89,6 +152,35 @@ func DownloadURL(ctx context.Context, rawURL, dest string, maxBytes int64) error
 		return fmt.Errorf("could not finalize media file")
 	}
 	return nil
+}
+
+func isArchiveHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return host == "archive.org" || host == "www.archive.org" || strings.HasSuffix(host, ".archive.org")
+}
+
+func isZipContentType(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	return value == "application/zip" || value == "application/x-zip-compressed" ||
+		value == "application/octet-stream"
+}
+
+func isEPUBContentType(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	return value == "application/epub+zip" || value == "application/zip" ||
+		value == "application/octet-stream"
+}
+
+func digitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func parseHTTPURL(raw string) (*url.URL, error) {

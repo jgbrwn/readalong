@@ -126,6 +126,25 @@ Suggested first policy:
 
 Do not silently pretend a low-confidence mapping is precise.
 
+### Current first-pass implementation
+
+The current aligner uses Unicode-aware normalization, exact four-word anchors,
+a monotonic cursor, and bounded sentence-local dynamic programming. It does
+not run a quadratic whole-book alignment or force word timestamps where no
+match exists. The reported quality is the fraction of EPUB word tokens that
+received a timestamped transcript match. Unmatched sentence windows may be
+interpolated only to keep the text window/chapter navigation usable; their
+words stay untimed and are never animated.
+
+The reader defaults to EPUB text at >=75% coverage. Below that it defaults to
+the transcript; if at least one anchor exists, the user may explicitly view
+canonical EPUB text with only matched words highlighted. With zero matched
+words it remains in transcript mode rather than loading an unbounded untimed
+book. This is intentionally more conservative than claiming that an EPUB/audio
+pair is aligned just because both files were imported. The first pass does not
+yet implement fuzzy spelling substitutions, manual anchor correction, or
+acoustic forced alignment.
+
 ## Optional future precision mode
 
 A direct acoustic forced aligner (CTC/wav2vec/MMS/WhisperX-style) can improve word boundaries when canonical ebook text is available. Projects such as `tale-align` demonstrate this approach and quality-gate the result. It requires a heavier Python/model stack, so it is deliberately phase 2+, not part of the simple Groq-first MVP.

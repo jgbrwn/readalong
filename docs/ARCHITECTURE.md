@@ -13,6 +13,8 @@ Go app on dedicated exe.dev VM
    |- local persistent book files
    |- yt-dlp / ffmpeg / ffprobe
    |- Groq Whisper API
+   |- LibriVox catalog API (throttled/cache)
+   |- Project Gutenberg/Archive.org approved source fetch
    `- background worker
 
 Optional future durable layer (Phase 3; not enabled by default)
@@ -57,8 +59,10 @@ data/
   app.db
   books/<hashed-user-id>/<book-id>/
     source/
+    source/librivox.zip
     playback.mp3
     book.epub
+    ebook.v1.json.gz
     book.json
     transcript.v1.json.gz
     alignment.v1.json.gz
@@ -85,7 +89,16 @@ Accepted inputs:
 - local uploaded audio (`mp3`, `m4a`, `m4b`, `wav`, `flac`, `ogg`, `opus`, `webm`, `mp4` audio track);
 - YouTube URL;
 - direct HTTP(S) audio URL;
-- other yt-dlp-supported webpage URLs are deferred; direct public media URLs and YouTube are supported in Phase 1.
+- source-linked LibriVox recording + Project Gutenberg EPUB pair;
+- other yt-dlp-supported webpage URLs are deferred.
+
+Paired-catalog search uses the documented LibriVox API, caches results, and
+spaces upstream requests. The client only returns records whose text-source
+URL maps to a canonical numeric Gutenberg ID and whose audio archive is on
+Archive.org. On import, the server re-fetches the record and derives the
+Gutenberg mirror path from that ID; no arbitrary URL is accepted.
+`docs/PAIRED_CATALOG.md` documents source policy, rights caveats, and network
+guards.
 
 YouTube strategy intentionally follows `jgbrwn/mst3k-anything`:
 

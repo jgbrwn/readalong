@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/jgbrwn/readalong/internal/align"
 	"github.com/jgbrwn/readalong/internal/config"
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/transcript"
@@ -122,6 +124,134 @@ func TestUploadedAudioRunsThroughFirstUsableTranscript(t *testing.T) {
 	chunks, err := d.Chunks(ctx, bookID)
 	if err != nil || len(chunks) != 1 || chunks[0].Status != "completed" {
 		t.Fatalf("chunk state = %#v, err=%v", chunks, err)
+	}
+}
+
+func TestUploadedAudioAndEPUBAlignCanonicalText(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	groqServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("invalid Groq multipart request: %v", err)
+		}
+		if !strings.Contains(r.FormValue("prompt"), "Test Story") {
+			t.Errorf("EPUB title hint missing from Groq prompt: %q", r.FormValue("prompt"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"text": "Hello there.",
+			"words": []map[string]any{
+				{"word": "Hello", "start": 0.2, "end": 0.5},
+				{"word": "there.", "start": 0.6, "end": 1.0},
+			},
+		})
+	}))
+	defer groqServer.Close()
+
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	d, err := db.Open(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if _, err := d.UpsertUser(ctx, "ebook-owner", "reader@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	bookID, jobID := "ebook-book", "ebook-job"
+	bookDir := BookDirectory(dataRoot, "ebook-owner", bookID)
+	sourceDir := filepath.Join(bookDir, "source")
+	if err := os.MkdirAll(sourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(sourceDir, "upload.wav")
+	cmd := exec.Command(ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-c:a", "pcm_s16le", audioPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("make test audio: %v: %s", err, output)
+	}
+	epubPath := filepath.Join(sourceDir, "book.epub")
+	writePipelineEPUB(t, epubPath)
+	audioRel, _ := filepath.Rel(dataRoot, audioPath)
+	epubRel, _ := filepath.Rel(dataRoot, epubPath)
+	if err := d.CreateBookAndJob(ctx, db.NewBook{
+		ID: bookID, JobID: jobID, OwnerUserID: "ebook-owner", Title: "Test Story",
+		SourceKind: "upload", AudioRelPath: audioRel, EpubRelPath: epubRel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, found, err := d.ClaimNextJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim job: found=%v err=%v", found, err)
+	}
+	service := New(config.Config{
+		DataDir: dataRoot, GroqAPIKey: "test-key", GroqModel: "test-model",
+		GroqChunkSeconds: 60, GroqOverlapSeconds: 2, MaxUploadBytes: 1 << 20,
+		FFmpegBin: ffmpeg, FFprobeBin: ffprobe,
+	}, d)
+	service.groq.Endpoint = groqServer.URL
+	service.process(ctx, job)
+
+	gotBook, err := d.BookByID(ctx, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotJob, err := d.JobStatus(ctx, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBook.Mode != "aligned" || gotBook.Status != "ready" || gotBook.Author != "Test Author" ||
+		gotBook.AlignmentRelPath == "" || gotBook.AlignmentQuality == nil || *gotBook.AlignmentQuality < 0.99 ||
+		gotJob.Status != "completed" {
+		t.Fatalf("paired book did not align: book=%#v job=%#v", gotBook, gotJob)
+	}
+	alignmentPath, err := safeDataPath(dataRoot, gotBook.AlignmentRelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result align.EbookAlignment
+	if err := readGzipJSON(alignmentPath, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Quality < 0.99 || len(result.Sentences.Sentences) != 1 ||
+		result.Sentences.Sentences[0].Words[0].Text != "Hello" ||
+		result.Sentences.Sentences[0].Words[0].Confidence == 0 {
+		t.Fatalf("unexpected alignment artifact: %#v", result)
+	}
+}
+
+func writePipelineEPUB(t *testing.T, filename string) {
+	t.Helper()
+	file, err := os.Create(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	entries := map[string]string{
+		"META-INF/container.xml": `<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>`,
+		"OPS/book.opf":           `<package><metadata><title>Test Story</title><creator>Test Author</creator><language>en</language></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>`,
+		"OPS/chapter.xhtml":      `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Hello there.</p></body></html>`,
+	}
+	for name, content := range entries {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

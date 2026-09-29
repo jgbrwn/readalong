@@ -1,29 +1,52 @@
 # Implementation status
 
-## Audio-only phase
+## Phase 1 — audio-only reader
 
 Implemented:
 
-- exe.dev-header identity, first-visit account creation, stable-ID ownership,
+- exe.dev-header identity, automatic per-user accounts, stable-ID ownership,
   and runtime-configured admin access;
-- secure localhost-only server configuration and systemd installation;
-- audio upload, YouTube acquisition, and SSRF-protected direct media download;
-- ffprobe metadata, MP3 playback normalization, chunking, and persistent jobs;
-- Groq word timestamps, overlap merging, atomic transcript files, rate-limit
-  queueing, and restart recovery;
-- bookshelf, Range-capable audio, SSE processing events, progress persistence,
-  and the mobile-first PWA reader.
+- loopback-only server configuration and systemd installation;
+- audio upload, YouTube acquisition, SSRF-protected direct-media downloads,
+  playback normalization, chunked Groq transcription, resumable jobs, and
+  absolute word timestamps;
+- owner-scoped bookshelf, title/author search, Range-capable playback, reader
+  windows, progress persistence, and the mobile-first PWA.
 
-Run `go test ./...`, `go vet ./...`, and `make build` before deployment. Live
-Groq and YouTube smoke tests are deliberately not part of automated tests.
+## Phase 2 — audio + EPUB reader
 
-## Not implemented yet
+The first end-to-end implementation is present:
 
-- EPUB extraction and quality-gated audio/text alignment;
-- generic yt-dlp webpage extraction beyond YouTube and direct public media;
+- upload audio with an EPUB, or import a source-linked LibriVox/Gutenberg pair;
+- parse EPUB metadata and spine-ordered XHTML, reflowing semantic text blocks;
+- send bounded title/chapter hints to Groq;
+- use exact-token anchors and bounded sentence-local alignment, persist a
+  versioned alignment artifact, and report matched-token coverage;
+- render canonical EPUB text with only matched/timed words highlighted;
+- fall back to transcript mode below 75% coverage, with an explicit reader
+  toggle for the EPUB text when at least one word was anchored. With zero
+  matches, Readalong keeps the transcript view rather than showing an
+  unbounded, untimed EPUB window.
+
+Pair discovery searches LibriVox's documented API and imports only records
+that link to Project Gutenberg text and an Archive.org audio archive. EPUBs
+are fetched from the Project Gutenberg mirror after a user confirms rights.
+This avoids scraping book pages and arbitrary user-supplied catalog URLs.
+
+**Phase 2 is implemented but not yet declared complete.** Exact alignment is
+covered by synthetic integration tests, and the full public-source ingestion
+path has been exercised with a fake Groq endpoint. Remaining validation:
+
+- process a real matching pair through Groq and inspect alignment quality;
+- exercise a deliberately wrong translation/edition and verify transcript
+  fallback and untimed ebook-word behavior;
+- validate long books and chapter/foreword differences on mobile and desktop.
+
+## Still remaining
+
+- generic yt-dlp webpage extraction beyond YouTube and direct media URLs;
 - R2 asset mirroring, Litestream credentials, and a verified restore drill;
-- cover extraction, search, bookmarks, and offline audio downloads.
+- cover extraction, bookmarks, quotes, and offline audio downloads.
 
-Each installation should verify its own private exe.dev share and configure
-secrets locally. Public source availability does not imply a public running
-service.
+Every installation should verify its own private exe.dev share. Public source
+availability does not imply a public running service.

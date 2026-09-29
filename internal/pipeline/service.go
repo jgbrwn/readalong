@@ -16,14 +16,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jgbrwn/readalong/internal/align"
 	"github.com/jgbrwn/readalong/internal/config"
 	"github.com/jgbrwn/readalong/internal/db"
+	"github.com/jgbrwn/readalong/internal/epub"
 	"github.com/jgbrwn/readalong/internal/groq"
 	"github.com/jgbrwn/readalong/internal/media"
 	"github.com/jgbrwn/readalong/internal/transcript"
 )
 
 const groqMaxChunkBytes = 24_000_000
+const maxStoredEPUBBytes = 150 << 20
 
 type Service struct {
 	cfg   config.Config
@@ -134,6 +137,9 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 	if book.Title != "" && book.Title != "Untitled" {
 		title = book.Title
 	}
+	if book.Mode == "aligned" && book.Author != "" {
+		author = book.Author
+	}
 	if title == "" {
 		title = book.Title
 		if title == "" {
@@ -181,6 +187,31 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 		s.fail(ctx, job, stage, book, "Could not save playback metadata.")
 		return
 	}
+	book.DurationMS, book.Title, book.Author = durationMS, title, author
+
+	var ebook *epub.Document
+	if book.Mode == "aligned" {
+		stage = "aligning"
+		if err := s.db.SetJobProgress(ctx, job.ID, stage, "transcribing", 0.14); err != nil {
+			return
+		}
+		ebook, err = s.prepareEbook(ctx, book, bookDir)
+		if err != nil {
+			s.fail(ctx, job, stage, book, "Could not load the paired EPUB. Retry, or add a valid Gutenberg EPUB.")
+			return
+		}
+		if ebook.Title != "" && book.Title == "Untitled" {
+			title = ebook.Title
+		}
+		if ebook.Author != "" && book.Author == "" {
+			author = ebook.Author
+		}
+		book.Title, book.Author = title, author
+		if err := s.db.SetBookMedia(ctx, book.ID, title, author, playbackRel, durationMS); err != nil {
+			s.fail(ctx, job, stage, book, "Could not save ebook metadata.")
+			return
+		}
+	}
 
 	if strings.TrimSpace(s.cfg.GroqAPIKey) == "" {
 		s.fail(ctx, job, "transcribing", book, "GROQ_API_KEY is not configured on the server.")
@@ -195,7 +226,11 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 	if err := s.db.SetJobProgress(ctx, job.ID, stage, "transcribing", 0.16); err != nil {
 		return
 	}
-	s.transcribe(ctx, job, book, bookDir, playbackPath, chunks)
+	prompt := ""
+	if ebook != nil {
+		prompt = ebook.HintPrompt()
+	}
+	s.transcribe(ctx, job, book, bookDir, playbackPath, chunks, prompt, ebook)
 }
 
 func (s *Service) acquire(ctx context.Context, job db.Job, book db.Book, bookDir string) (string, media.SourceMetadata, error) {
@@ -221,6 +256,21 @@ func (s *Service) acquire(ctx context.Context, job db.Job, book db.Book, bookDir
 		path = filepath.Join(sourceDir, "source.download")
 		if fileMissingOrEmpty(path) {
 			if err := media.DownloadURL(ctx, book.SourceURL, path, s.cfg.MaxUploadBytes); err != nil {
+				return "", metadata, err
+			}
+		}
+	case "librivox":
+		metadata = media.SourceMetadata{Title: book.Title, Uploader: book.Author}
+		archivePath := filepath.Join(sourceDir, "librivox.zip")
+		path = filepath.Join(sourceDir, "librivox.mp3")
+		if fileMissingOrEmpty(path) {
+			if fileMissingOrEmpty(archivePath) {
+				if err := media.DownloadLibriVoxArchive(ctx, book.SourceURL, archivePath, s.cfg.MaxUploadBytes); err != nil {
+					return "", metadata, err
+				}
+			}
+			if err := media.JoinLibriVoxArchive(ctx, archivePath, path,
+				filepath.Join(bookDir, "work", "librivox-tracks"), s.cfg.FFmpegBin, s.cfg.MaxUploadBytes); err != nil {
 				return "", metadata, err
 			}
 		}
@@ -278,7 +328,8 @@ func (s *Service) ensureChunks(ctx context.Context, bookID, bookDir string, dura
 	return s.db.Chunks(ctx, bookID)
 }
 
-func (s *Service) transcribe(ctx context.Context, job db.Job, book db.Book, bookDir, playbackPath string, chunks []db.Chunk) {
+func (s *Service) transcribe(ctx context.Context, job db.Job, book db.Book, bookDir, playbackPath string,
+	chunks []db.Chunk, prompt string, ebook *epub.Document) {
 	responses := make(map[int]groq.Response, len(chunks))
 	completed := 0
 	for _, chunk := range chunks {
@@ -345,7 +396,7 @@ func (s *Service) transcribe(ctx context.Context, job db.Job, book db.Book, book
 			s.fail(ctx, job, "transcribing", book, "Audio chunk exceeds the transcription upload limit.")
 			return
 		}
-		response, err := s.groq.TranscribeFile(ctx, audioPath, "")
+		response, err := s.groq.TranscribeFile(ctx, audioPath, prompt)
 		if err != nil {
 			var limited *groq.RateLimitError
 			if errors.As(err, &limited) {
@@ -391,8 +442,87 @@ func (s *Service) transcribe(ctx context.Context, job db.Job, book db.Book, book
 		_ = s.db.SetJobProgress(ctx, job.ID, "transcribing", bookStatus, progress(completed, len(chunks)))
 	}
 	if completed == len(chunks) {
+		if ebook != nil {
+			if err := s.db.SetJobProgress(ctx, job.ID, "aligning", "ready", 0.97); err != nil {
+				return
+			}
+			if err := s.alignEbook(ctx, bookDir, book.ID, *ebook); err != nil {
+				s.fail(ctx, job, "aligning", book, "The transcript is ready, but ebook alignment failed. Retry to try alignment again.")
+				return
+			}
+		}
 		_ = s.db.CompleteJob(ctx, job.ID)
 	}
+}
+
+func (s *Service) prepareEbook(ctx context.Context, book db.Book, bookDir string) (*epub.Document, error) {
+	epubPath := ""
+	if book.EpubRelPath != "" {
+		var err error
+		epubPath, err = safeDataPath(s.cfg.DataDir, book.EpubRelPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if epubPath == "" && book.GutenbergID != "" {
+		epubPath = filepath.Join(bookDir, "source", "book.epub")
+		if fileMissingOrEmpty(epubPath) {
+			if err := media.DownloadGutenbergEPUB(ctx, book.GutenbergID, epubPath, maxStoredEPUBBytes); err != nil {
+				return nil, err
+			}
+		}
+		rel, err := filepath.Rel(s.cfg.DataDir, epubPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.db.SetEpubPath(ctx, book.ID, rel); err != nil {
+			return nil, err
+		}
+	}
+	if epubPath == "" || fileMissingOrEmpty(epubPath) {
+		return nil, fmt.Errorf("paired EPUB is missing")
+	}
+	document, err := epub.ParseFile(epubPath)
+	if err != nil {
+		return nil, err
+	}
+	artifact := filepath.Join(bookDir, "ebook.v1.json.gz")
+	if err := writeGzipJSONAtomic(artifact, document); err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(s.cfg.DataDir, artifact)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.db.SetEbookJSONPath(ctx, book.ID, rel); err != nil {
+		return nil, err
+	}
+	return &document, nil
+}
+
+func (s *Service) alignEbook(ctx context.Context, bookDir, bookID string, ebook epub.Document) error {
+	book, err := s.db.BookByID(ctx, bookID)
+	if err != nil {
+		return err
+	}
+	transcriptPath, err := safeDataPath(s.cfg.DataDir, book.TranscriptRelPath)
+	if err != nil {
+		return err
+	}
+	var acoustic transcript.Document
+	if err := readGzipJSON(transcriptPath, &acoustic); err != nil {
+		return err
+	}
+	result := align.AlignEbook(ebook, acoustic)
+	alignmentPath := filepath.Join(bookDir, "alignment.v1.json.gz")
+	if err := writeGzipJSONAtomic(alignmentPath, result); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(s.cfg.DataDir, alignmentPath)
+	if err != nil {
+		return err
+	}
+	return s.db.SetAlignment(ctx, bookID, rel, result.Quality)
 }
 
 func (s *Service) writeTranscript(ctx context.Context, bookID, bookDir string, chunks []db.Chunk,

@@ -13,31 +13,38 @@ import (
 type DB struct{ *sql.DB }
 
 type Book struct {
-	ID                string  `json:"id"`
-	Title             string  `json:"title"`
-	Author            string  `json:"author"`
-	SourceKind        string  `json:"source_kind"`
-	Mode              string  `json:"mode"`
-	Status            string  `json:"status"`
-	JobStatus         string  `json:"job_status,omitempty"`
-	DurationMS        int64   `json:"duration_ms"`
-	Stage             string  `json:"stage,omitempty"`
-	Progress          float64 `json:"progress,omitempty"`
-	Error             string  `json:"error,omitempty"`
-	PositionMS        int64   `json:"position_ms,omitempty"`
-	PlaybackRate      float64 `json:"playback_rate,omitempty"`
-	SyncOffsetMS      int64   `json:"sync_offset_ms,omitempty"`
-	AppearanceJSON    string  `json:"appearance_json,omitempty"`
-	CreatedAt         string  `json:"created_at"`
-	UpdatedAt         string  `json:"updated_at"`
-	OwnerUserID       string  `json:"-"`
-	SourceURL         string  `json:"-"`
-	AudioRelPath      string  `json:"-"`
-	TranscriptRelPath string  `json:"-"`
+	ID                string   `json:"id"`
+	Title             string   `json:"title"`
+	Author            string   `json:"author"`
+	SourceKind        string   `json:"source_kind"`
+	Mode              string   `json:"mode"`
+	GutenbergID       string   `json:"gutenberg_id,omitempty"`
+	EbookSourceURL    string   `json:"ebook_source_url,omitempty"`
+	AlignmentQuality  *float64 `json:"alignment_quality,omitempty"`
+	Status            string   `json:"status"`
+	JobStatus         string   `json:"job_status,omitempty"`
+	DurationMS        int64    `json:"duration_ms"`
+	Stage             string   `json:"stage,omitempty"`
+	Progress          float64  `json:"progress,omitempty"`
+	Error             string   `json:"error,omitempty"`
+	PositionMS        int64    `json:"position_ms,omitempty"`
+	PlaybackRate      float64  `json:"playback_rate,omitempty"`
+	SyncOffsetMS      int64    `json:"sync_offset_ms,omitempty"`
+	AppearanceJSON    string   `json:"appearance_json,omitempty"`
+	CreatedAt         string   `json:"created_at"`
+	UpdatedAt         string   `json:"updated_at"`
+	OwnerUserID       string   `json:"-"`
+	SourceURL         string   `json:"-"`
+	AudioRelPath      string   `json:"-"`
+	EpubRelPath       string   `json:"-"`
+	EbookJSONRelPath  string   `json:"-"`
+	AlignmentRelPath  string   `json:"-"`
+	TranscriptRelPath string   `json:"-"`
 }
 
 type NewBook struct {
-	ID, OwnerUserID, Title, SourceKind, SourceURL, AudioRelPath, JobID string
+	ID, OwnerUserID, Title, Author, SourceKind, SourceURL, AudioRelPath, EpubRelPath string
+	EbookSourceURL, GutenbergID, JobID                                               string
 }
 
 type Job struct {
@@ -109,7 +116,8 @@ CREATE TABLE IF NOT EXISTS books (
  id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  title TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '', source_kind TEXT NOT NULL DEFAULT '', source_url TEXT,
  mode TEXT NOT NULL DEFAULT 'transcript', status TEXT NOT NULL DEFAULT 'queued', duration_ms INTEGER NOT NULL DEFAULT 0,
- audio_relpath TEXT, epub_relpath TEXT, transcript_relpath TEXT, alignment_relpath TEXT, alignment_quality REAL,
+ audio_relpath TEXT, epub_relpath TEXT, ebook_json_relpath TEXT, transcript_relpath TEXT,
+ alignment_relpath TEXT, alignment_quality REAL, gutenberg_id TEXT, ebook_source_url TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS books_owner_created ON books(owner_user_id, created_at DESC);
@@ -149,6 +157,18 @@ CREATE TABLE IF NOT EXISTS reading_progress (
 		{"status", "TEXT NOT NULL DEFAULT 'active'"},
 	} {
 		if err := d.ensureColumn("users", col.name, col.definition); err != nil {
+			return err
+		}
+	}
+	for _, col := range []struct{ name, definition string }{
+		{"epub_relpath", "TEXT"},
+		{"ebook_json_relpath", "TEXT"},
+		{"alignment_relpath", "TEXT"},
+		{"alignment_quality", "REAL"},
+		{"gutenberg_id", "TEXT"},
+		{"ebook_source_url", "TEXT"},
+	} {
+		if err := d.ensureColumn("books", col.name, col.definition); err != nil {
 			return err
 		}
 	}
@@ -227,7 +247,13 @@ func (d *DB) UpsertUser(ctx context.Context, id, email string, configuredAdmin, 
 }
 
 func (d *DB) BooksForUser(ctx context.Context, uid string) ([]Book, error) {
-	rows, err := d.QueryContext(ctx, `SELECT `+bookSelectColumns+` WHERE b.owner_user_id=? ORDER BY b.created_at DESC`, uid)
+	return d.SearchBooksForUser(ctx, uid, "")
+}
+
+func (d *DB) SearchBooksForUser(ctx context.Context, uid, query string) ([]Book, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+bookSelectColumns+`
+		WHERE b.owner_user_id=? AND (?='' OR instr(lower(b.title),lower(?))>0 OR instr(lower(b.author),lower(?))>0)
+		ORDER BY b.created_at DESC`, uid, query, query, query)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +274,9 @@ const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b
 	COALESCE(p.position_ms,0),COALESCE(p.playback_rate,1),COALESCE(p.sync_offset_ms,0),
 	COALESCE(p.appearance_json,'{}'),
 	b.created_at,b.updated_at,b.owner_user_id,COALESCE(b.source_url,''),COALESCE(b.audio_relpath,''),
-	COALESCE(b.transcript_relpath,'')
+	COALESCE(b.epub_relpath,''),COALESCE(b.ebook_json_relpath,''),COALESCE(b.transcript_relpath,''),
+	COALESCE(b.alignment_relpath,''),b.alignment_quality,COALESCE(b.gutenberg_id,''),
+	COALESCE(b.ebook_source_url,'')
 	FROM books b
 	LEFT JOIN jobs j ON j.id=(SELECT j2.id FROM jobs j2 WHERE j2.book_id=b.id ORDER BY j2.created_at DESC LIMIT 1)
 	LEFT JOIN reading_progress p ON p.book_id=b.id AND p.user_id=b.owner_user_id`
@@ -259,9 +287,15 @@ type rowScanner interface {
 
 func scanBook(row rowScanner) (Book, error) {
 	var b Book
+	var alignmentQuality sql.NullFloat64
 	err := row.Scan(&b.ID, &b.Title, &b.Author, &b.SourceKind, &b.Mode, &b.Status, &b.DurationMS,
 		&b.JobStatus, &b.Stage, &b.Progress, &b.Error, &b.PositionMS, &b.PlaybackRate, &b.SyncOffsetMS,
-		&b.AppearanceJSON, &b.CreatedAt, &b.UpdatedAt, &b.OwnerUserID, &b.SourceURL, &b.AudioRelPath, &b.TranscriptRelPath)
+		&b.AppearanceJSON, &b.CreatedAt, &b.UpdatedAt, &b.OwnerUserID, &b.SourceURL, &b.AudioRelPath,
+		&b.EpubRelPath, &b.EbookJSONRelPath, &b.TranscriptRelPath, &b.AlignmentRelPath,
+		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL)
+	if alignmentQuality.Valid {
+		b.AlignmentQuality = &alignmentQuality.Float64
+	}
 	return b, err
 }
 
@@ -283,15 +317,22 @@ func (d *DB) BookByID(ctx context.Context, bid string) (Book, error) {
 
 func (d *DB) CreateBookAndJob(ctx context.Context, in NewBook) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	mode := "transcript"
+	if in.EpubRelPath != "" || in.GutenbergID != "" {
+		mode = "aligned"
+	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO books
-		(id,owner_user_id,title,source_kind,source_url,mode,status,audio_relpath,created_at,updated_at)
-		VALUES(?,?,?,?,?,'transcript','queued',?,?,?)`,
-		in.ID, in.OwnerUserID, in.Title, in.SourceKind, nullableString(in.SourceURL), in.AudioRelPath, now, now)
+		(id,owner_user_id,title,author,source_kind,source_url,mode,status,audio_relpath,epub_relpath,
+		 gutenberg_id,ebook_source_url,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)`,
+		in.ID, in.OwnerUserID, in.Title, in.Author, in.SourceKind, nullableString(in.SourceURL), mode,
+		nullableString(in.AudioRelPath), nullableString(in.EpubRelPath), nullableString(in.GutenbergID),
+		nullableString(in.EbookSourceURL), now, now)
 	if err != nil {
 		return err
 	}
@@ -309,6 +350,25 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+func (d *DB) SetEbookJSONPath(ctx context.Context, id, relPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET ebook_json_relpath=?,updated_at=? WHERE id=?`, relPath, now, id)
+	return err
+}
+
+func (d *DB) SetEpubPath(ctx context.Context, id, relPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET epub_relpath=?,updated_at=? WHERE id=?`, relPath, now, id)
+	return err
+}
+
+func (d *DB) SetAlignment(ctx context.Context, id, relPath string, quality float64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET alignment_relpath=?,alignment_quality=?,updated_at=? WHERE id=?`,
+		relPath, quality, now, id)
+	return err
 }
 
 func (d *DB) SetBookMedia(ctx context.Context, id, title, author, audioRelPath string, durationMS int64) error {
