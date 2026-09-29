@@ -111,9 +111,12 @@ async function boot() {
   try {
     const user = await api('/api/me');
     $('#who').textContent = user.email || '';
+    $('#who').title = user.email || '';
+    $('#who').setAttribute('aria-label', user.email ? `Signed in as ${user.email}` : 'Signed in');
     if (user.role === 'admin') $('#adminToggle').hidden = false;
   } catch {
     $('#who').textContent = 'Authentication required';
+    $('#who').title = 'Authentication required';
   }
   await loadBooks();
 }

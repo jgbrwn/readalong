@@ -13,6 +13,8 @@
 - Gutenberg EPUB download uses the validated numeric ID and fixed HTTPS mirror
   path; off-host redirects are rejected.
 - A LibriVox chapter ZIP is path-safe, naturally ordered, and joins to one MP3.
+- A LibriVox no-result 404 displays an empty result state; transient upstream
+  failures retry once without violating the request gap.
 - Public media URL redirecting to a private IP is rejected.
 - Bad/404 URL.
 - URL resolving to localhost/private IP is rejected for direct HTTP fetch.
@@ -23,6 +25,9 @@
 - Word + segment timestamps parse correctly.
 - 8-minute FLAC chunks remain under configured upload limit.
 - 2-second overlap merges without duplicate words.
+- Timestamp regressions never reorder transcript tokens; severe regressions
+  remain readable but are not highlighted.
+- Repeated words spoken close together are not discarded as chunk duplicates.
 - Kill process halfway through; completed chunks are reused after restart.
 - Simulated 429 stores retry time and resumes later.
 - A successfully transcribed first chunk remains readable while later chunks are queued.
@@ -35,6 +40,8 @@
 - Change speed 1.0 -> 1.75 -> 0.8.
 - Pause/resume.
 - Switch browser tab for a minute and return.
+- A reader time-window transition loads once at the bucket boundary and does
+  not repeatedly replace or scroll the same window.
 - Apply +/- sync offset.
 - Tap word seeks accurately.
 
@@ -57,6 +64,7 @@
 
 - Search matches title and author without returning another user's books.
 - Empty results and clearing the query remain usable on mobile.
+- Email identity badge remains readable without overlap at 320px and 360px.
 
 ## Auth
 
@@ -80,6 +88,9 @@
 - Player controls reachable one-handed.
 - Reader uses absolute media time after seek and playback-rate changes.
 - Reader controls collapse; light/dark, text size, highlight mode, and sync offset persist.
+- Theme saves during playback and survives an immediate mobile reload.
+- Screen wake lock is requested while playing where supported, then released on
+  pause/backgrounding and reacquired when playback returns to the foreground.
 - Service worker update does not strand stale API responses.
 
 ## Backup

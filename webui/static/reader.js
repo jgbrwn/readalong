@@ -11,14 +11,23 @@ let activeSentences = [];
 let windowStart = 0;
 let windowEnd = 0;
 let requestSequence = 0;
+let loadingWindow = null;
 let activeWord = -1;
 let activeSentence = -1;
 let animationFrame = 0;
 let saveTimer = 0;
+let appearanceSaveTimer = 0;
 let progressRetryTimer = 0;
+let lastSaveAttempt = 0;
+let saveInFlight = false;
+let saveAgain = false;
+let appearanceUpdatedAt = 0;
+let screenWakeLock = null;
+let screenWakeRequest = null;
 let ready = false;
 let readerMode = 'transcript';
 let savedAppearance = { font_size: 1.35, theme: 'light', highlight_mode: 'word' };
+const progressSaveInterval = 12000;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -63,15 +72,42 @@ function showError(message, canRetry = false) {
 }
 
 function applyAppearance() {
-  document.body.classList.toggle('theme-dark', savedAppearance.theme === 'dark');
+  const dark = savedAppearance.theme === 'dark';
+  document.body.classList.toggle('theme-dark', dark);
   document.body.style.setProperty('--reader-size', `${savedAppearance.font_size || 1.35}rem`);
   $('#highlightMode').value = savedAppearance.highlight_mode || 'word';
-  $('#themeToggle').setAttribute('aria-pressed', String(savedAppearance.theme === 'dark'));
+  $('#themeToggle').textContent = dark ? '☀' : '☾';
+  $('#themeToggle').setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+  $('#themeToggle').setAttribute('title', dark ? 'Switch to light mode' : 'Switch to dark mode');
+  $('#themeToggle').setAttribute('aria-pressed', String(dark));
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#171d19' : '#fbfaf6');
   updateHighlight();
 }
 
 function persistAppearance() {
-  scheduleSave();
+  appearanceUpdatedAt = Date.now();
+  try {
+    localStorage.setItem(appearanceStorageKey(), JSON.stringify({
+      updated_at: appearanceUpdatedAt,
+      appearance: savedAppearance,
+    }));
+  } catch { /* server persistence remains available if storage is disabled */ }
+  queueAppearanceSave();
+}
+
+function appearanceStorageKey() {
+  return `readalong:appearance:${bookID}`;
+}
+
+function readLocalAppearance() {
+  try {
+    const value = JSON.parse(localStorage.getItem(appearanceStorageKey()) || 'null');
+    if (!value || !Number.isFinite(Number(value.updated_at)) ||
+        !value.appearance || typeof value.appearance !== 'object') return null;
+    return { updatedAt: Number(value.updated_at), appearance: value.appearance };
+  } catch {
+    return null;
+  }
 }
 
 async function loadBook() {
@@ -85,11 +121,19 @@ async function loadBook() {
   readerMode = book.mode === 'aligned' && Number(book.alignment_quality) >= 0.75 ? 'ebook' : 'transcript';
   updateModeToggle(book);
 
-  try {
-    const appearance = JSON.parse(book.appearance_json || '{}');
-    savedAppearance = { ...savedAppearance, ...appearance };
-  } catch { /* ignore older or invalid preference data */ }
+  let serverAppearance = {};
+  try { serverAppearance = JSON.parse(book.appearance_json || '{}') || {}; } catch { /* old preference data */ }
+  appearanceUpdatedAt = Number(serverAppearance._updated_at) || 0;
+  delete serverAppearance._updated_at;
+  const localAppearance = readLocalAppearance();
+  const preferLocal = localAppearance && localAppearance.updatedAt > appearanceUpdatedAt;
+  savedAppearance = {
+    ...savedAppearance,
+    ...(preferLocal ? localAppearance.appearance : serverAppearance),
+  };
+  if (preferLocal) appearanceUpdatedAt = localAppearance.updatedAt;
   applyAppearance();
+  if (preferLocal) queueAppearanceSave();
 
   const rate = Number(book.playback_rate) || 1;
   if (![...$('#playbackRate').options].some((option) => Number(option.value) === rate)) {
@@ -112,6 +156,7 @@ async function loadWindow(atMS) {
   const request = ++requestSequence;
   const start = Math.max(0, Math.floor(Math.max(0, atMS) / windowLength) * windowLength);
   const end = start + windowLength;
+  loadingWindow = { request, start };
   setStatus('Loading words…');
   try {
     const query = new URLSearchParams({
@@ -130,16 +175,21 @@ async function loadWindow(atMS) {
     book = data.book;
     readerMode = data.content_mode || readerMode;
     updateModeToggle(book);
+    updateAlignmentNotice(data);
     chapters = data.chapters || chapters;
     const sentences = data.sentences || [];
-    windowStart = sentences[0]?.start_ms ?? data.start_ms;
-    windowEnd = sentences.at(-1)?.end_ms ?? data.end_ms;
+    windowStart = Number(data.start_ms ?? start);
+    windowEnd = Number(data.end_ms ?? end);
     renderSentences(sentences);
     ready = true;
     showError(book.error || '');
     if (readerMode === 'ebook') {
       const quality = Number(data.alignment_quality ?? book.alignment_quality) || 0;
-      setStatus(quality >= 0.9 ? 'Ebook text · strong match' : 'Ebook text · partial match');
+      setStatus(quality >= 0.9
+        ? 'Ebook text · strong match'
+        : quality >= 0.75
+          ? 'Ebook text · partial match'
+          : `Ebook excerpt · very low match (${(quality * 100).toFixed(2)}%)`);
     } else if (book.mode === 'aligned' && data.alignment_pending) {
       setStatus('Transcript ready · aligning ebook');
     } else if (book.mode === 'aligned' && Number(book.alignment_quality) < 0.75) {
@@ -155,6 +205,8 @@ async function loadWindow(atMS) {
       setStatus('Reader unavailable');
       showError(error.message || 'Could not load this section.');
     }
+  } finally {
+    if (loadingWindow?.request === request) loadingWindow = null;
   }
 }
 
@@ -169,10 +221,29 @@ function statusLabel(value) {
 
 function updateModeToggle(value = book) {
   const button = $('#readerModeToggle');
-  const hasEbook = value?.mode === 'aligned' && Number(value.alignment_quality) > 0;
+  const quality = Number(value?.alignment_quality) || 0;
+  const hasEbook = value?.mode === 'aligned' && quality > 0;
+  const weakMatch = hasEbook && quality < 0.75;
   button.hidden = !hasEbook;
-  button.textContent = readerMode === 'ebook' ? 'Show transcript' : 'Show EPUB';
-  button.setAttribute('aria-label', readerMode === 'ebook' ? 'Show audio transcript' : 'Show ebook text');
+  button.textContent = readerMode === 'ebook' ? 'Show transcript' : weakMatch ? 'Show EPUB excerpt' : 'Show EPUB';
+  button.setAttribute('aria-label', readerMode === 'ebook'
+    ? 'Show audio transcript'
+    : weakMatch ? 'Show ebook excerpt; the audio match is very low' : 'Show ebook text');
+  button.title = weakMatch
+    ? 'Very little of this ebook matches the recording; only confident word matches are highlighted.'
+    : '';
+}
+
+function updateAlignmentNotice(data) {
+  const notice = $('#alignmentNotice');
+  const quality = Number(data.alignment_quality ?? data.book?.alignment_quality) || 0;
+  if (readerMode !== 'ebook' || quality >= 0.75) {
+    notice.hidden = true;
+    notice.textContent = '';
+    return;
+  }
+  notice.hidden = false;
+  notice.textContent = `Only ${(quality * 100).toFixed(2)}% of this EPUB matched the audio. This is a short excerpt around the current playback position; word highlights are sparse. The EPUB was processed, but this recording may be abridged or a different text.`;
 }
 
 function renderSentences(sentences) {
@@ -291,15 +362,11 @@ function updateClock() {
 function ensureWindow() {
   if (!ready) return;
   const timeMS = audio.currentTime * 1000;
-  const nearEnd = windowEnd > 0 && timeMS >= windowEnd - 20000 && windowEnd < book.duration_ms;
-  if (timeMS < windowStart || timeMS >= windowEnd || nearEnd) {
-    if (loadingAt !== null) return;
-    const target = timeMS >= windowEnd - 20000 ? windowEnd : timeMS;
-    loadingAt = target;
-    loadWindow(target).finally(() => { loadingAt = null; });
-  }
+  if (timeMS >= windowStart && timeMS < windowEnd) return;
+  const targetStart = Math.max(0, Math.floor(Math.max(0, timeMS) / windowLength) * windowLength);
+  if (loadingWindow?.start === targetStart) return;
+  void loadWindow(timeMS);
 }
-let loadingAt = null;
 
 function frame() {
   updateHighlight();
@@ -321,24 +388,101 @@ function enablePlayer() {
   $('#seek').disabled = false;
 }
 
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveProgress, 1800);
+function showWakeStatus(message, unavailable = false) {
+  const status = $('#screenAwake');
+  status.textContent = message;
+  status.hidden = !message;
+  status.title = message;
+  status.setAttribute('aria-label', message);
+  status.classList.toggle('unavailable', unavailable);
 }
 
-async function saveProgress() {
+async function requestScreenWakeLock(allowWhileStarting = false) {
+  if ((audio.paused && !allowWhileStarting) || document.visibilityState !== 'visible') return;
+  if (screenWakeLock && !screenWakeLock.released) return;
+  if (screenWakeRequest) return;
+  if (!navigator.wakeLock?.request) {
+    showWakeStatus('Screen may sleep', true);
+    return;
+  }
+  const pending = navigator.wakeLock.request('screen');
+  screenWakeRequest = pending;
+  try {
+    const lock = await pending;
+    if ((audio.paused && !allowWhileStarting) || document.visibilityState !== 'visible') {
+      await lock.release();
+      return;
+    }
+    screenWakeLock = lock;
+    showWakeStatus('Screen stays awake');
+    lock.addEventListener('release', () => {
+      if (screenWakeLock !== lock) return;
+      screenWakeLock = null;
+      if (!audio.paused && document.visibilityState === 'visible') {
+        showWakeStatus('Screen may sleep', true);
+      } else {
+        showWakeStatus('');
+      }
+    });
+  } catch {
+    showWakeStatus(!audio.paused && document.visibilityState === 'visible' ? 'Screen may sleep' : '',
+      !audio.paused && document.visibilityState === 'visible');
+  } finally {
+    if (screenWakeRequest === pending) screenWakeRequest = null;
+  }
+}
+
+function releaseScreenWakeLock() {
+  const lock = screenWakeLock;
+  screenWakeLock = null;
+  showWakeStatus('');
+  if (lock && !lock.released) void lock.release().catch(() => {});
+}
+
+function scheduleSave(immediate = false) {
+  if (immediate) {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    void saveProgress();
+    return;
+  }
+  if (saveTimer) return;
+  const delay = Math.max(0, progressSaveInterval - (Date.now() - lastSaveAttempt));
+  saveTimer = setTimeout(() => {
+    saveTimer = 0;
+    void saveProgress();
+  }, delay);
+}
+
+function queueAppearanceSave() {
+  clearTimeout(appearanceSaveTimer);
+  appearanceSaveTimer = setTimeout(() => {
+    appearanceSaveTimer = 0;
+    void saveProgress();
+  }, 180);
+}
+
+async function saveProgress({ keepalive = false } = {}) {
   if (!bookID) return;
+  if (saveInFlight && !keepalive) {
+    saveAgain = true;
+    return;
+  }
+  if (!keepalive) saveInFlight = true;
+  lastSaveAttempt = Date.now();
   const appearance = {
-    ...savedAppearance,
-    font_size: Number(savedAppearance.font_size) || 1.35,
+    font_size: Math.min(2.4, Math.max(1, Number(savedAppearance.font_size) || 1.35)),
     theme: savedAppearance.theme || 'light',
-    highlight_mode: $('#highlightMode').value || 'word',
+    highlight_mode: ['word', 'sentence', 'minimal'].includes($('#highlightMode').value)
+      ? $('#highlightMode').value
+      : 'word',
+    _updated_at: appearanceUpdatedAt,
   };
-  savedAppearance = appearance;
   try {
     await api(`/api/books/${encodeURIComponent(bookID)}/progress`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
+      keepalive,
       body: JSON.stringify({
         position_ms: Math.max(0, Math.round((audio.currentTime || 0) * 1000)),
         playback_rate: audio.playbackRate || 1,
@@ -348,7 +492,23 @@ async function saveProgress() {
     });
   } catch (error) {
     console.warn('Progress could not be saved:', error.message);
+  } finally {
+    if (!keepalive) {
+      saveInFlight = false;
+      if (saveAgain) {
+        saveAgain = false;
+        scheduleSave(true);
+      }
+    }
   }
+}
+
+function flushProgress() {
+  clearTimeout(saveTimer);
+  clearTimeout(appearanceSaveTimer);
+  saveTimer = 0;
+  appearanceSaveTimer = 0;
+  void saveProgress({ keepalive: true });
 }
 
 function connectProgress() {
@@ -368,7 +528,10 @@ function connectProgress() {
     }
     if (data.job_status === 'completed' || data.job_status === 'error') {
       stream.close();
-      if (data.job_status === 'completed' && book?.mode === 'aligned') refreshBookMode();
+      const alignmentStillPending = !Number.isFinite(Number(book?.alignment_quality));
+      if (data.job_status === 'completed' && book?.mode === 'aligned' && alignmentStillPending) {
+        refreshBookMode();
+      }
     } else if (data.stage === 'rate_limited') {
       stream.close();
       const retryAt = Date.parse(data.not_before_at || '');
@@ -409,7 +572,14 @@ async function retry() {
 $('#playPause').addEventListener('click', async () => {
   if (!ready) return;
   if (audio.paused) {
-    try { await audio.play(); } catch { setStatus('Tap play to start audio'); }
+    const wakeLock = requestScreenWakeLock(true);
+    try {
+      await audio.play();
+      await wakeLock;
+    } catch {
+      releaseScreenWakeLock();
+      setStatus('Tap play to start audio');
+    }
   } else {
     audio.pause();
   }
@@ -425,14 +595,14 @@ $('#forward30').addEventListener('click', () => { audio.currentTime = Math.min(a
 $('#seek').addEventListener('input', (event) => {
   if (Number.isFinite(audio.duration)) audio.currentTime = Number(event.target.value);
 });
-$('#seek').addEventListener('change', scheduleSave);
+$('#seek').addEventListener('change', () => scheduleSave(true));
 $('#playbackRate').addEventListener('change', (event) => {
   audio.playbackRate = Number(event.target.value);
-  scheduleSave();
+  scheduleSave(true);
 });
 $('#syncOffset').addEventListener('input', () => { updateHighlight(); scheduleSave(); });
 $('#syncOffset').addEventListener('change', persistAppearance);
-$('#highlightMode').addEventListener('change', () => { updateHighlight(); scheduleSave(); });
+$('#highlightMode').addEventListener('change', () => { updateHighlight(); persistAppearance(); });
 $('#controlsToggle').addEventListener('click', (event) => {
   const panel = $('#expandedControls');
   const expanded = panel.hidden;
@@ -442,15 +612,15 @@ $('#controlsToggle').addEventListener('click', (event) => {
 });
 $('#fontDown').addEventListener('click', () => {
   savedAppearance.font_size = Math.max(1, (Number(savedAppearance.font_size) || 1.35) - .1);
-  applyAppearance(); scheduleSave();
+  applyAppearance(); persistAppearance();
 });
 $('#fontUp').addEventListener('click', () => {
   savedAppearance.font_size = Math.min(2.4, (Number(savedAppearance.font_size) || 1.35) + .1);
-  applyAppearance(); scheduleSave();
+  applyAppearance(); persistAppearance();
 });
 $('#themeToggle').addEventListener('click', () => {
   savedAppearance.theme = savedAppearance.theme === 'dark' ? 'light' : 'dark';
-  applyAppearance(); scheduleSave();
+  applyAppearance(); persistAppearance();
 });
 $('#readerText').addEventListener('click', (event) => {
   if (window.getSelection()?.toString()) return;
@@ -472,13 +642,15 @@ audio.addEventListener('timeupdate', () => {
 audio.addEventListener('play', () => {
   $('#playPause').textContent = 'Ⅱ';
   $('#playPause').setAttribute('aria-label', 'Pause');
+  void requestScreenWakeLock();
   startSyncLoop();
 });
 audio.addEventListener('pause', () => {
   $('#playPause').textContent = '▶';
   $('#playPause').setAttribute('aria-label', 'Play');
   cancelAnimationFrame(animationFrame);
-  scheduleSave();
+  releaseScreenWakeLock();
+  scheduleSave(true);
 });
 audio.addEventListener('seeked', () => {
   updateClock();
@@ -489,7 +661,10 @@ audio.addEventListener('ratechange', () => {
   $('#playbackRate').value = String(audio.playbackRate);
   scheduleSave();
 });
-audio.addEventListener('ended', saveProgress);
+audio.addEventListener('ended', () => {
+  releaseScreenWakeLock();
+  scheduleSave(true);
+});
 
 document.addEventListener('keydown', (event) => {
   if (event.target.matches('input,select,textarea,button') || event.metaKey || event.ctrlKey) return;
@@ -503,10 +678,24 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    flushProgress();
+    releaseScreenWakeLock();
+    return;
+  }
+  updateClock();
+  ensureWindow();
+  updateHighlight();
+  if (!audio.paused) {
+    void requestScreenWakeLock();
+    startSyncLoop();
+  }
+});
 window.addEventListener('pagehide', () => {
-  clearTimeout(saveTimer);
   clearTimeout(progressRetryTimer);
-  saveProgress();
+  releaseScreenWakeLock();
+  flushProgress();
 });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(console.warn);
 loadBook().catch((error) => {

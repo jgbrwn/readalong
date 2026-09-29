@@ -70,18 +70,20 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 
-	mu          sync.Mutex
-	lastRequest time.Time
-	queries     map[string]cacheEntry
-	byID        map[string]recordEntry
+	mu            sync.Mutex
+	lastRequest   time.Time
+	minRequestGap time.Duration
+	queries       map[string]cacheEntry
+	byID          map[string]recordEntry
 }
 
 func NewClient() *Client {
 	return &Client{
-		BaseURL: defaultLibriVoxAPI,
-		HTTP:    &http.Client{Timeout: 20 * time.Second},
-		queries: make(map[string]cacheEntry),
-		byID:    make(map[string]recordEntry),
+		BaseURL:       defaultLibriVoxAPI,
+		HTTP:          &http.Client{Timeout: 20 * time.Second},
+		minRequestGap: requestGap,
+		queries:       make(map[string]cacheEntry),
+		byID:          make(map[string]recordEntry),
 	}
 }
 
@@ -172,15 +174,6 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 		clear(c.byID)
 	}
 
-	if wait := requestGap - time.Since(c.lastRequest); wait > 0 && !c.lastRequest.IsZero() {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
 	base := c.BaseURL
 	if base == "" {
 		base = defaultLibriVoxAPI
@@ -190,12 +183,6 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 		return nil, fmt.Errorf("LibriVox catalog endpoint is invalid")
 	}
 	u.RawQuery = values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("could not create catalog request")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Readalong/1.0 (paired public-domain catalog)")
 	client := c.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
@@ -207,18 +194,45 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 		}
 		return nil
 	}
-	c.lastRequest = time.Now()
-	resp, err := safeClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LibriVox catalog returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil || len(body) > maxResponseBytes {
-		return nil, fmt.Errorf("LibriVox catalog response is too large")
+	var status int
+	var body []byte
+	for attempt := 0; attempt < 2; attempt++ {
+		status, body, err = c.requestCatalog(ctx, &safeClient, u)
+		if err != nil {
+			if attempt == 0 && ctx.Err() == nil {
+				continue
+			}
+			return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable")
+		}
+		if status == http.StatusOK {
+			break
+		}
+		if status == http.StatusNotFound {
+			var apiError struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(body, &apiError) == nil &&
+				strings.EqualFold(strings.TrimSpace(apiError.Error), "Audiobooks could not be found") {
+				if values.Has("id") {
+					return nil, fmt.Errorf("LibriVox record was not found")
+				}
+				records := []Record{}
+				c.queries[key] = cacheEntry{expires: time.Now().Add(cacheDuration), records: records}
+				return records, nil
+			}
+		}
+		if attempt == 0 && transientCatalogStatus(status) {
+			continue
+		}
+		if status == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("LibriVox catalog is busy; wait a few seconds and try again")
+		}
+		if status >= 500 {
+			return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable (HTTP %d)", status)
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("LibriVox catalog returned HTTP %d", status)
+		}
 	}
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -234,6 +248,43 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 	}
 	c.queries[key] = cacheEntry{expires: time.Now().Add(cacheDuration), records: records}
 	return append([]Record(nil), records...), nil
+}
+
+func (c *Client) requestCatalog(ctx context.Context, client *http.Client, u *url.URL) (int, []byte, error) {
+	if wait := c.minRequestGap - time.Since(c.lastRequest); wait > 0 && !c.lastRequest.IsZero() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("could not create catalog request")
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Readalong/1.0 (paired public-domain catalog)")
+	c.lastRequest = time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return 0, nil, fmt.Errorf("catalog response could not be read")
+	}
+	if len(body) > maxResponseBytes {
+		return 0, nil, fmt.Errorf("catalog response is too large")
+	}
+	return resp.StatusCode, body, nil
+}
+
+func transientCatalogStatus(status int) bool {
+	return status >= 500 && status <= 599 &&
+		status != http.StatusNotImplemented && status != http.StatusHTTPVersionNotSupported
 }
 
 func sameCatalogOrigin(base, target *url.URL) bool {

@@ -6,6 +6,12 @@ import (
 	"unicode"
 )
 
+const (
+	smallTimestampJitterMS = int64(150)
+	overlapToleranceMS     = int64(750)
+	singleWordOverlapMS    = int64(120)
+)
+
 type TimedWord struct {
 	Text       string
 	StartMS    int64
@@ -41,16 +47,35 @@ func MergeChunks(chunks []TimedChunk, durationMS int64) Document {
 			}
 			words = append(words, word)
 		}
-		sort.SliceStable(words, func(i, j int) bool { return words[i].StartMS < words[j].StartMS })
 		drop := overlapPrefix(merged, words)
 		for _, word := range words[drop:] {
 			if duplicateNearTail(merged, word) {
 				continue
 			}
+			if len(merged) > 0 && word.StartMS <= merged[len(merged)-1].StartMS {
+				previousStart := merged[len(merged)-1].StartMS
+				if previousStart-word.StartMS > smallTimestampJitterMS {
+					// Keep Groq's lexical order. A bad boundary is safer left
+					// untimed than moved in front of the preceding spoken word.
+					word.Confidence = 0
+				}
+				word.StartMS = previousStart + 1
+			}
+			if word.EndMS <= word.StartMS {
+				word.EndMS = word.StartMS + 1
+				word.Confidence = 0
+			}
+			if durationMS > 0 {
+				if word.StartMS >= durationMS {
+					continue
+				}
+				if word.EndMS > durationMS {
+					word.EndMS = durationMS
+				}
+			}
 			merged = append(merged, word)
 		}
 	}
-	sort.SliceStable(merged, func(i, j int) bool { return merged[i].StartMS < merged[j].StartMS })
 	return Document{Version: 1, DurationMS: durationMS, Sentences: sentences(merged)}
 }
 
@@ -58,11 +83,16 @@ func overlapPrefix(previous, next []TimedWord) int {
 	max := min(25, min(len(previous), len(next)))
 	for n := max; n > 0; n-- {
 		match := true
+		tolerance := overlapToleranceMS
+		if n == 1 {
+			tolerance = singleWordOverlapMS
+		}
 		for i := 0; i < n; i++ {
 			a := previous[len(previous)-n+i]
 			b := next[i]
 			if tokenKey(a.Text) == "" || tokenKey(a.Text) != tokenKey(b.Text) ||
-				abs64(a.StartMS-b.StartMS) > 5000 {
+				abs64(a.StartMS-b.StartMS) > tolerance ||
+				abs64(a.EndMS-b.EndMS) > tolerance {
 				match = false
 				break
 			}
@@ -77,11 +107,12 @@ func overlapPrefix(previous, next []TimedWord) int {
 func duplicateNearTail(previous []TimedWord, word TimedWord) bool {
 	for i := len(previous) - 1; i >= 0 && i >= len(previous)-25; i-- {
 		p := previous[i]
-		if p.EndMS < word.StartMS-2500 {
+		if p.StartMS < word.StartMS-singleWordOverlapMS {
 			break
 		}
 		if tokenKey(p.Text) == tokenKey(word.Text) && tokenKey(word.Text) != "" &&
-			abs64(p.StartMS-word.StartMS) <= 500 && p.EndMS >= word.StartMS-250 {
+			abs64(p.StartMS-word.StartMS) <= singleWordOverlapMS &&
+			abs64(p.EndMS-word.EndMS) <= 2*singleWordOverlapMS {
 			return true
 		}
 	}
@@ -113,6 +144,9 @@ func sentences(words []TimedWord) []Sentence {
 		if len(current) == 0 {
 			return
 		}
+		if len(out) > 0 && end < out[len(out)-1].EndMS {
+			end = out[len(out)-1].EndMS
+		}
 		out = append(out, Sentence{
 			ID: "s" + itoa(len(out)+1), ParagraphID: "s" + itoa(len(out)+1), StartMS: start, EndMS: end,
 			Words: append([]Word(nil), current...),
@@ -127,7 +161,7 @@ func sentences(words []TimedWord) []Sentence {
 			start = word.StartMS
 		}
 		current = append(current, Word{Text: word.Text, StartMS: word.StartMS, EndMS: word.EndMS, Confidence: word.Confidence})
-		end = word.EndMS
+		end = max(end, word.EndMS)
 		if len(current) >= 40 {
 			flush()
 		}

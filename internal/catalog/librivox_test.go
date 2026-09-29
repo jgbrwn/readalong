@@ -121,3 +121,55 @@ func TestSearchRequiresBoundedQuery(t *testing.T) {
 		t.Fatalf("valid query rejected: %v", err)
 	}
 }
+
+func TestSearchTreatsDocumentedNoResults404AsEmptyAndCachesIt(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"Audiobooks could not be found"}`))
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	for range 2 {
+		pairs, err := client.Search(context.Background(), "Titus Groan")
+		if err != nil {
+			t.Fatalf("no-match response should not appear as an outage: %v", err)
+		}
+		if len(pairs) != 0 {
+			t.Fatalf("unexpected pairs: %#v", pairs)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("cached no-match search made %d requests", calls)
+	}
+}
+
+func TestSearchRetriesTransientCatalogFailureOnce(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(522)
+			_, _ = w.Write([]byte("upstream timeout"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response{Books: []Record{{
+			ID: "391", Title: "Gift of the Magi",
+			URLTextSource: "https://www.gutenberg.org/ebooks/7256",
+			URLZipFile:    "https://archive.org/compress/gift-of-the-magi/formats=64KBPS%20MP3",
+			URLLibriVox:   "https://librivox.org/gift-of-the-magi/",
+		}}})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
+	pairs, err := client.Search(context.Background(), "Gift of the Magi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(pairs) != 1 || pairs[0].RecordID != "391" {
+		t.Fatalf("calls=%d pairs=%#v", calls, pairs)
+	}
+}

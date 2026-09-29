@@ -33,6 +33,17 @@ private.
   provisioning and server-side ownership checks.
 - Install as a PWA; the web app and its media service remain on one VM.
 
+## Screenshots
+
+These mobile previews use generated sample text and a demo identity; no private
+bookshelf or uploaded audiobook is shown.
+
+<p align="center">
+  <img src="docs/assets/readalong-bookshelf-mobile.png" alt="Readalong mobile bookshelf" width="31%">
+  <img src="docs/assets/readalong-reader-light-mobile.png" alt="Readalong reader in light mode on mobile" width="31%">
+  <img src="docs/assets/readalong-reader-dark-mobile.png" alt="Readalong reader in dark mode on mobile" width="31%">
+</p>
+
 **Alignment caveat:** Readalong can now extract EPUB text and align it against
 the audiobook transcript. Pair discovery confirms that sources are linked; it
 does not guarantee an identical edition. When text match confidence is low,

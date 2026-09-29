@@ -24,6 +24,7 @@
   </header>
   <main class="reader-main">
     <div id="readerError" class="reader-error" hidden></div>
+    <p id="alignmentNotice" class="reader-notice" role="status" hidden></p>
     <div id="readerText" class="reader-text" aria-label="Synchronized transcript or ebook text"></div>
   </main>
   <section class="player-dock" aria-label="Audio controls">
@@ -39,6 +40,7 @@
           <button id="playPause" class="play-button" type="button" aria-label="Play">▶</button>
           <button id="forward30" type="button" aria-label="Forward 30 seconds">+30</button>
         </div>
+        <span id="screenAwake" class="screen-awake" aria-live="polite" hidden>Screen stays awake</span>
         <button id="controlsToggle" class="controls-pill" type="button" aria-expanded="false" aria-controls="expandedControls">Controls ↑</button>
       </div>
       <div id="expandedControls" class="expanded-controls" hidden>
@@ -65,7 +67,7 @@
             <option value="sentence">Sentence</option>
             <option value="minimal">Minimal</option>
           </select>
-          <button id="themeToggle" type="button" aria-label="Toggle dark mode">◐</button>
+          <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode" aria-pressed="false">☾</button>
         </div>
       </div>
     </div>

@@ -6,6 +6,8 @@ Implemented:
 
 - exe.dev-header identity, automatic per-user accounts, stable-ID ownership,
   and runtime-configured admin access;
+- mobile identity badge layout, persisted reader appearance, and
+  feature-detected screen wake lock during visible playback;
 - loopback-only server configuration and systemd installation;
 - audio upload, YouTube acquisition, SSRF-protected direct-media downloads,
   playback normalization, chunked Groq transcription, resumable jobs, and
@@ -23,6 +25,8 @@ The first end-to-end implementation is present:
 - use exact-token anchors and bounded sentence-local alignment, persist a
   versioned alignment artifact, and report matched-token coverage;
 - render canonical EPUB text with only matched/timed words highlighted;
+- preserve Groq token order when word timestamps regress; untimed words stay
+  readable without a misleading animated highlight;
 - fall back to transcript mode below 75% coverage, with an explicit reader
   toggle for the EPUB text when at least one word was anchored. With zero
   matches, Readalong keeps the transcript view rather than showing an

@@ -40,6 +40,10 @@ import form.
   a 15-minute in-process cache, and a three-second minimum gap between upstream
   requests. Results are limited to HTTPS LibriVox records whose text source is
   Project Gutenberg and whose audio archive is Archive.org.
+- LibriVox returns HTTP 404 with `Audiobooks could not be found` for an empty
+  title search; Readalong treats that no-result response as an empty result
+  list, not a provider outage. Transient upstream failures get at most one
+  retry, still separated by the configured request gap.
 - LibriVox's September 16, 2026 API notice set a 500-record maximum target
   for on/after September 26, 2026 and asks clients to leave several seconds
   between calls. The rollout status is not assumed; Readalong requests only

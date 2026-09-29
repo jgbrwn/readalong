@@ -39,6 +39,12 @@ Convert to absolute media times by adding `chunk_start`.
 
 Chunks overlap by ~2 seconds. De-duplicate by comparing normalized trailing words of chunk N against leading words of chunk N+1. Use a bounded longest matching suffix/prefix (e.g. up to 25 words), preferring exact normalized matches but allowing one-token ASR differences. Never keep duplicate time regions.
 
+Preserve the transcription provider's word order. Do not sort individual words
+by timestamps to repair small timing regressions; that can put audible words
+out of order in the transcript. Keep tokens in chunk order, clamp minor time
+regressions to a searchable monotonic timeline, and leave severely regressed
+words untimed instead of highlighting them with false precision.
+
 ### Transcript shaping
 
 Use Groq punctuation/segments to group words into sentences and paragraphs. The visible word token keeps punctuation, but matching uses a normalized token.
