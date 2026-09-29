@@ -1,0 +1,16 @@
+# Environment variables are expanded by Litestream unless -no-expand-env is used.
+# Use Litestream v0.5+.
+dbs:
+  - path: ${APP_DATA_DIR}/app.db
+    snapshot:
+      interval: 1h
+      retention: 168h
+    replica:
+      type: s3
+      bucket: ${R2_BUCKET}
+      path: ${R2_PREFIX}/sqlite
+      endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+      region: auto
+      access-key-id: ${R2_ACCESS_KEY_ID}
+      secret-access-key: ${R2_SECRET_ACCESS_KEY}
+      sync-interval: 1s

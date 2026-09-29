@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f7f6f2">
+  <meta name="description" content="A calm, synchronized audiobook reader.">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/app.css">
+  <title>Readalong</title>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Readalong bookshelf">readalong<span>·</span></a>
+    <div class="top-actions">
+      <span id="who" class="user-email"></span>
+      <button id="adminToggle" class="button button-quiet" hidden>People</button>
+      <button id="add" class="button">＋ Add a book</button>
+    </div>
+  </header>
+
+  <main id="shelfPage">
+    <section class="hero">
+      <p class="eyebrow">YOUR PRIVATE LIBRARY</p>
+      <h1>Make room<br>for the story.</h1>
+      <p class="hero-copy">Listen to an audiobook while its words unfold. Add a YouTube audiobook, a direct audio link, or a file from your device.</p>
+      <button id="heroAdd" class="button button-light">Add your first book <span aria-hidden="true">↗</span></button>
+    </section>
+    <section class="shelf-section">
+      <div class="section-heading">
+        <div><p class="eyebrow">THE COLLECTION</p><h2>Your bookshelf</h2></div>
+        <span id="bookCount" class="muted"></span>
+      </div>
+      <div id="books" class="book-grid" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <main id="adminPanel" hidden>
+    <section class="admin-page">
+      <button id="adminBack" class="button button-quiet">← Bookshelf</button>
+      <p class="eyebrow">ADMINISTRATION</p>
+      <h1>People</h1>
+      <p class="muted">Manage account access. Bookshelves remain private to their owners, including yours.</p>
+      <div id="adminUsers" class="people-list"></div>
+    </section>
+  </main>
+
+  <dialog id="addDialog" class="sheet">
+    <form id="importForm" method="dialog">
+      <button type="button" class="close-button" id="closeImport" aria-label="Close">×</button>
+      <p class="eyebrow">START READING</p>
+      <h2>Add a book</h2>
+      <label>Book title <span class="optional">optional</span>
+        <input name="title" type="text" maxlength="255" placeholder="The title will be detected if available">
+      </label>
+      <label>Audiobook URL
+        <input name="source_url" type="url" placeholder="YouTube or direct audio link">
+      </label>
+      <div class="or-divider"><span>or upload a file</span></div>
+      <label class="file-picker">Audio file
+        <input name="audio_file" type="file" accept=".mp3,.m4a,.m4b,.wav,.flac,.ogg,.opus,.webm,.mp4,audio/*">
+        <span class="file-help">MP3, M4A/M4B, WAV, FLAC, OGG, OPUS, WEBM, MP4</span>
+      </label>
+      <p id="importError" class="form-message" role="status"></p>
+      <button id="importSubmit" class="button button-wide" type="submit">Add to bookshelf</button>
+      <p class="fine-print">Audio is stored in your private library and transcribed by Groq.</p>
+    </form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

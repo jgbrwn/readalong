@@ -1,0 +1,649 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	_ "modernc.org/sqlite"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+type DB struct{ *sql.DB }
+
+type Book struct {
+	ID                string  `json:"id"`
+	Title             string  `json:"title"`
+	Author            string  `json:"author"`
+	SourceKind        string  `json:"source_kind"`
+	Mode              string  `json:"mode"`
+	Status            string  `json:"status"`
+	JobStatus         string  `json:"job_status,omitempty"`
+	DurationMS        int64   `json:"duration_ms"`
+	Stage             string  `json:"stage,omitempty"`
+	Progress          float64 `json:"progress,omitempty"`
+	Error             string  `json:"error,omitempty"`
+	PositionMS        int64   `json:"position_ms,omitempty"`
+	PlaybackRate      float64 `json:"playback_rate,omitempty"`
+	SyncOffsetMS      int64   `json:"sync_offset_ms,omitempty"`
+	AppearanceJSON    string  `json:"appearance_json,omitempty"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+	OwnerUserID       string  `json:"-"`
+	SourceURL         string  `json:"-"`
+	AudioRelPath      string  `json:"-"`
+	TranscriptRelPath string  `json:"-"`
+}
+
+type NewBook struct {
+	ID, OwnerUserID, Title, SourceKind, SourceURL, AudioRelPath, JobID string
+}
+
+type Job struct {
+	ID, OwnerUserID, BookID, Kind, Status, Stage, Error, NotBeforeAt string
+	Progress                                                         float64
+	Attempt                                                          int
+}
+
+type Chapter struct {
+	ID      string `json:"id"`
+	BookID  string `json:"book_id"`
+	Ordinal int    `json:"ordinal"`
+	Title   string `json:"title"`
+	StartMS int64  `json:"start_ms"`
+	EndMS   int64  `json:"end_ms"`
+}
+
+type Chunk struct {
+	ID              string
+	BookID          string
+	Ordinal         int
+	StartMS         int64
+	EndMS           int64
+	Status          string
+	AudioRelPath    string
+	ResponseRelPath string
+	NotBeforeAt     string
+	Error           string
+}
+
+type User struct {
+	ID         string `json:"id"`
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	Status     string `json:"status"`
+	BookCount  int64  `json:"book_count"`
+	CreatedAt  string `json:"created_at"`
+	LastSeenAt string `json:"last_seen_at"`
+}
+
+func Open(dataDir string) (*DB, error) {
+	if err := os.MkdirAll(dataDir, 0750); err != nil {
+		return nil, err
+	}
+	p := filepath.Join(dataDir, "app.db")
+	s, err := sql.Open("sqlite", "file:"+p+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)")
+	if err != nil {
+		return nil, err
+	}
+	d := &DB{s}
+	if err = d.migrate(); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+func (d *DB) migrate() error {
+	schema := `
+CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user',
+ status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_bootstrap_claims (
+ email TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+ claimed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS books (
+ id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ title TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '', source_kind TEXT NOT NULL DEFAULT '', source_url TEXT,
+ mode TEXT NOT NULL DEFAULT 'transcript', status TEXT NOT NULL DEFAULT 'queued', duration_ms INTEGER NOT NULL DEFAULT 0,
+ audio_relpath TEXT, epub_relpath TEXT, transcript_relpath TEXT, alignment_relpath TEXT, alignment_quality REAL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS books_owner_created ON books(owner_user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS chapters (
+ id TEXT PRIMARY KEY, book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL,
+ title TEXT NOT NULL DEFAULT '', start_ms INTEGER NOT NULL DEFAULT 0, end_ms INTEGER NOT NULL DEFAULT 0,
+ transcript_state TEXT NOT NULL DEFAULT 'pending', alignment_quality REAL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+ id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT '', progress REAL NOT NULL DEFAULT 0,
+ attempt INTEGER NOT NULL DEFAULT 0, error TEXT, not_before_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, not_before_at, created_at);
+CREATE INDEX IF NOT EXISTS jobs_book_created ON jobs(book_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS chunks (
+ id TEXT PRIMARY KEY, book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+ ordinal INTEGER NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+ status TEXT NOT NULL DEFAULT 'queued', audio_relpath TEXT NOT NULL DEFAULT '',
+ response_relpath TEXT NOT NULL DEFAULT '', not_before_at TEXT, error TEXT,
+ UNIQUE(book_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS chunks_book_order ON chunks(book_id, ordinal);
+CREATE TABLE IF NOT EXISTS reading_progress (
+ user_id TEXT NOT NULL, book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+ position_ms INTEGER NOT NULL DEFAULT 0, playback_rate REAL NOT NULL DEFAULT 1.0, sync_offset_ms INTEGER NOT NULL DEFAULT 0,
+ appearance_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
+ PRIMARY KEY(user_id, book_id)
+);`
+	_, err := d.Exec(schema)
+	if err != nil {
+		return err
+	}
+	// Upgrade databases created by earlier scaffold revisions.
+	for _, col := range []struct{ name, definition string }{
+		{"role", "TEXT NOT NULL DEFAULT 'user'"},
+		{"status", "TEXT NOT NULL DEFAULT 'active'"},
+	} {
+		if err := d.ensureColumn("users", col.name, col.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) ensureColumn(table, name, definition string) error {
+	rows, err := d.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var col, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &col, &typ, &notnull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if col == name {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = d.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + definition)
+	return err
+}
+
+// UpsertUser provisions every identity authenticated by the exe.dev proxy.
+// Bootstrap-email admin access is claimed once and then bound to the stable
+// exe.dev user ID, so a later email change cannot transfer the role.
+func (d *DB) UpsertUser(ctx context.Context, id, email string, configuredAdmin, bootstrapAdmin bool) (User, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO users(id,email,created_at,last_seen_at) VALUES(?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET email=excluded.email,last_seen_at=excluded.last_seen_at`, id, email, now, now)
+	if err != nil {
+		return User{}, err
+	}
+	if bootstrapAdmin {
+		_, err = tx.ExecContext(ctx, `INSERT INTO admin_bootstrap_claims(email,user_id,claimed_at)
+			VALUES(?,?,?) ON CONFLICT(email) DO NOTHING`, email, id, now)
+		if err != nil {
+			return User{}, err
+		}
+	}
+	var claimed int
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_bootstrap_claims WHERE user_id=?`, id).Scan(&claimed)
+	if err != nil {
+		return User{}, err
+	}
+	role := "user"
+	if configuredAdmin || claimed > 0 {
+		role = "admin"
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE users SET role=? WHERE id=?`, role, id)
+	if err != nil {
+		return User{}, err
+	}
+	var u User
+	err = tx.QueryRowContext(ctx, `SELECT id,email,role,status,created_at,last_seen_at
+		FROM users WHERE id=?`, id).Scan(&u.ID, &u.Email, &u.Role, &u.Status, &u.CreatedAt, &u.LastSeenAt)
+	if err != nil {
+		return User{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
+func (d *DB) BooksForUser(ctx context.Context, uid string) ([]Book, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+bookSelectColumns+` WHERE b.owner_user_id=? ORDER BY b.created_at DESC`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Book
+	for rows.Next() {
+		b, err := scanBook(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b.duration_ms,
+	COALESCE(j.status,''),COALESCE(j.stage,''),COALESCE(j.progress,0),COALESCE(j.error,''),
+	COALESCE(p.position_ms,0),COALESCE(p.playback_rate,1),COALESCE(p.sync_offset_ms,0),
+	COALESCE(p.appearance_json,'{}'),
+	b.created_at,b.updated_at,b.owner_user_id,COALESCE(b.source_url,''),COALESCE(b.audio_relpath,''),
+	COALESCE(b.transcript_relpath,'')
+	FROM books b
+	LEFT JOIN jobs j ON j.id=(SELECT j2.id FROM jobs j2 WHERE j2.book_id=b.id ORDER BY j2.created_at DESC LIMIT 1)
+	LEFT JOIN reading_progress p ON p.book_id=b.id AND p.user_id=b.owner_user_id`
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanBook(row rowScanner) (Book, error) {
+	var b Book
+	err := row.Scan(&b.ID, &b.Title, &b.Author, &b.SourceKind, &b.Mode, &b.Status, &b.DurationMS,
+		&b.JobStatus, &b.Stage, &b.Progress, &b.Error, &b.PositionMS, &b.PlaybackRate, &b.SyncOffsetMS,
+		&b.AppearanceJSON, &b.CreatedAt, &b.UpdatedAt, &b.OwnerUserID, &b.SourceURL, &b.AudioRelPath, &b.TranscriptRelPath)
+	return b, err
+}
+
+func (d *DB) BookForUser(ctx context.Context, uid, bid string) (Book, error) {
+	b, err := scanBook(d.QueryRowContext(ctx, `SELECT `+bookSelectColumns+` WHERE b.owner_user_id=? AND b.id=?`, uid, bid))
+	if err != nil {
+		return Book{}, fmt.Errorf("book not found")
+	}
+	return b, nil
+}
+
+func (d *DB) BookByID(ctx context.Context, bid string) (Book, error) {
+	b, err := scanBook(d.QueryRowContext(ctx, `SELECT `+bookSelectColumns+` WHERE b.id=?`, bid))
+	if err != nil {
+		return Book{}, err
+	}
+	return b, nil
+}
+
+func (d *DB) CreateBookAndJob(ctx context.Context, in NewBook) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO books
+		(id,owner_user_id,title,source_kind,source_url,mode,status,audio_relpath,created_at,updated_at)
+		VALUES(?,?,?,?,?,'transcript','queued',?,?,?)`,
+		in.ID, in.OwnerUserID, in.Title, in.SourceKind, nullableString(in.SourceURL), in.AudioRelPath, now, now)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO jobs
+		(id,owner_user_id,book_id,kind,status,stage,progress,created_at,updated_at)
+		VALUES(?,?,?,'book','queued','queued',0,?,?)`, in.JobID, in.OwnerUserID, in.ID, now, now)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (d *DB) SetBookMedia(ctx context.Context, id, title, author, audioRelPath string, durationMS int64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET
+		title=CASE WHEN title='' OR title='Untitled' THEN ? ELSE title END,
+		author=?,audio_relpath=?,duration_ms=?,updated_at=? WHERE id=?`,
+		title, author, audioRelPath, durationMS, now, id)
+	return err
+}
+
+func (d *DB) SetTranscriptPath(ctx context.Context, id, transcriptRelPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET transcript_relpath=?,updated_at=? WHERE id=?`,
+		transcriptRelPath, now, id)
+	return err
+}
+
+func (d *DB) SetBookAudioPath(ctx context.Context, id, audioRelPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `UPDATE books SET audio_relpath=?,updated_at=? WHERE id=?`,
+		audioRelPath, now, id)
+	return err
+}
+
+func (d *DB) ReplaceChapters(ctx context.Context, bookID string, chapters []Chapter) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM chapters WHERE book_id=?`, bookID); err != nil {
+		return err
+	}
+	for _, c := range chapters {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO chapters(id,book_id,ordinal,title,start_ms,end_ms)
+			VALUES(?,?,?,?,?,?)`, c.ID, bookID, c.Ordinal, c.Title, c.StartMS, c.EndMS); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) Chapters(ctx context.Context, bookID string) ([]Chapter, error) {
+	rows, err := d.QueryContext(ctx, `SELECT id,book_id,ordinal,title,start_ms,end_ms
+		FROM chapters WHERE book_id=? ORDER BY ordinal`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Chapter
+	for rows.Next() {
+		var c Chapter
+		if err := rows.Scan(&c.ID, &c.BookID, &c.Ordinal, &c.Title, &c.StartMS, &c.EndMS); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) EnsureChunks(ctx context.Context, chunks []Chunk) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, c := range chunks {
+		_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO chunks
+			(id,book_id,ordinal,start_ms,end_ms,audio_relpath,response_relpath) VALUES(?,?,?,?,?,?,?)`,
+			c.ID, c.BookID, c.Ordinal, c.StartMS, c.EndMS, c.AudioRelPath, c.ResponseRelPath)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) Chunks(ctx context.Context, bookID string) ([]Chunk, error) {
+	rows, err := d.QueryContext(ctx, `SELECT id,book_id,ordinal,start_ms,end_ms,status,audio_relpath,
+		response_relpath,COALESCE(not_before_at,''),COALESCE(error,'')
+		FROM chunks WHERE book_id=? ORDER BY ordinal`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Chunk
+	for rows.Next() {
+		var c Chunk
+		if err := rows.Scan(&c.ID, &c.BookID, &c.Ordinal, &c.StartMS, &c.EndMS, &c.Status,
+			&c.AudioRelPath, &c.ResponseRelPath, &c.NotBeforeAt, &c.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) UpdateChunk(ctx context.Context, c Chunk) error {
+	_, err := d.ExecContext(ctx, `UPDATE chunks SET status=?,response_relpath=?,not_before_at=?,error=? WHERE id=?`,
+		c.Status, c.ResponseRelPath, nullableString(c.NotBeforeAt), nullableString(c.Error), c.ID)
+	return err
+}
+
+func (d *DB) ResetInterruptedJobs(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := d.ExecContext(ctx, `UPDATE jobs SET status='queued',updated_at=?
+		WHERE status='running'`, now); err != nil {
+		return err
+	}
+	_, err := d.ExecContext(ctx, `UPDATE chunks SET status='queued'
+		WHERE status='running'`)
+	return err
+}
+
+func (d *DB) ClaimNextJob(ctx context.Context) (Job, bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, false, err
+	}
+	defer tx.Rollback()
+	var j Job
+	err = tx.QueryRowContext(ctx, `SELECT id,owner_user_id,book_id,kind,status,stage,progress,attempt,
+		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs
+		WHERE status='queued' AND (not_before_at IS NULL OR not_before_at<=?)
+		ORDER BY created_at LIMIT 1`, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
+		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
+	if err == sql.ErrNoRows {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status='running',attempt=attempt+1,error=NULL,updated_at=?
+		WHERE id=? AND status='queued'`, now, j.ID)
+	if err != nil {
+		return Job{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Job{}, false, err
+	}
+	if affected == 0 {
+		return Job{}, false, nil
+	}
+	j.Status = "running"
+	j.Attempt++
+	if err := tx.Commit(); err != nil {
+		return Job{}, false, err
+	}
+	return j, true, nil
+}
+
+func (d *DB) SetJobProgress(ctx context.Context, id, stage, bookStatus string, progress float64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE jobs SET stage=?,progress=?,error=NULL,updated_at=? WHERE id=?`, stage, progress, now, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE books SET status=?,updated_at=?
+		WHERE id=(SELECT book_id FROM jobs WHERE id=?)`, bookStatus, now, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) CompleteJob(ctx context.Context, id string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE jobs SET status='completed',stage='ready',progress=1,
+		error=NULL,not_before_at=NULL,updated_at=? WHERE id=?`, now, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE books SET status='ready',updated_at=?
+		WHERE id=(SELECT book_id FROM jobs WHERE id=?)`, now, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) DeferJob(ctx context.Context, id, stage, bookStatus, notBefore string, progress float64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	message := ""
+	if stage == "rate_limited" {
+		message = "Groq rate limit reached; this book is queued to resume."
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE jobs SET status='queued',stage=?,progress=?,not_before_at=?,
+		error=?,updated_at=? WHERE id=?`, stage, progress, notBefore, nullableString(message), now, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE books SET status=?,updated_at=?
+		WHERE id=(SELECT book_id FROM jobs WHERE id=?)`, bookStatus, now, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) FailJob(ctx context.Context, id, stage, bookStatus, message string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE jobs SET status='error',stage=?,error=?,not_before_at=NULL,
+		updated_at=? WHERE id=?`, stage, message, now, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE books SET status=?,updated_at=?
+		WHERE id=(SELECT book_id FROM jobs WHERE id=?)`, bookStatus, now, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) RetryJob(ctx context.Context, ownerID, bookID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status='queued',stage='queued',error=NULL,
+		not_before_at=NULL,updated_at=? WHERE book_id=? AND owner_user_id=? AND status='error'`,
+		now, bookID, ownerID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("retry not available")
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE books SET status=CASE WHEN transcript_relpath IS NULL OR transcript_relpath=''
+		THEN 'queued' ELSE 'ready' END,updated_at=? WHERE id=? AND owner_user_id=?`, now, bookID, ownerID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE chunks SET status='queued',not_before_at=NULL,error=NULL
+		WHERE book_id=? AND status='error'`, bookID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) DeleteBook(ctx context.Context, ownerID, bookID string) error {
+	res, err := d.ExecContext(ctx, `DELETE FROM books WHERE id=? AND owner_user_id=?`, bookID, ownerID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("book not found")
+	}
+	return nil
+}
+
+func (d *DB) SaveProgress(ctx context.Context, userID, bookID string, positionMS int64, rate float64, offsetMS int64, appearance string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `INSERT INTO reading_progress
+		(user_id,book_id,position_ms,playback_rate,sync_offset_ms,appearance_json,updated_at)
+		VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+		position_ms=excluded.position_ms,playback_rate=excluded.playback_rate,
+		sync_offset_ms=excluded.sync_offset_ms,appearance_json=excluded.appearance_json,updated_at=excluded.updated_at`,
+		userID, bookID, positionMS, rate, offsetMS, appearance, now)
+	return err
+}
+
+func (d *DB) JobStatus(ctx context.Context, bookID string) (Job, error) {
+	var j Job
+	err := d.QueryRowContext(ctx, `SELECT id,owner_user_id,book_id,kind,status,stage,progress,attempt,
+		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs WHERE book_id=?
+		ORDER BY created_at DESC LIMIT 1`, bookID).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
+		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
+	return j, err
+}
+
+func (d *DB) AssertBookOwner(ctx context.Context, uid, bid string) error {
+	var x int
+	if err := d.QueryRowContext(ctx, `SELECT 1 FROM books WHERE id=? AND owner_user_id=?`, bid, uid).Scan(&x); err != nil {
+		return fmt.Errorf("book not found")
+	}
+	return nil
+}
+
+func (d *DB) Users(ctx context.Context) ([]User, error) {
+	rows, err := d.QueryContext(ctx, `SELECT u.id,u.email,u.role,u.status,
+		u.created_at,u.last_seen_at,COUNT(b.id)
+		FROM users u LEFT JOIN books b ON b.owner_user_id=u.id
+		GROUP BY u.id ORDER BY u.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Status,
+			&u.CreatedAt, &u.LastSeenAt, &u.BookCount); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (d *DB) SetUserStatus(ctx context.Context, id, status string) error {
+	res, err := d.ExecContext(ctx, `UPDATE users SET status=? WHERE id=?`, status, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}

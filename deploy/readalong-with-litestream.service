@@ -1,0 +1,25 @@
+[Unit]
+Description=Readalong + Litestream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@APP_DIR@/.env
+UnsetEnvironment=GROQ_API_KEY CLOUDFLARE_API_TOKEN
+ExecStart=@LITESTREAM_BIN@ replicate -config @APP_DIR@/deploy/litestream.yml -restore-if-db-not-exists -exec '@APP_DIR@/bin/readalong'
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=@APP_DIR@/data
+ReadWritePaths=@APP_DIR@/.tools
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

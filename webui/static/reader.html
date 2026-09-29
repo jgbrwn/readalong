@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#fbfaf6">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/app.css">
+  <title>Readalong</title>
+</head>
+<body class="reader-body">
+  <header class="reader-topbar">
+    <a href="/" aria-label="Back to bookshelf">← <span>Bookshelf</span></a>
+    <div class="reader-identity">
+      <h1 id="bookTitle" class="reader-bookname">Opening your book…</h1>
+      <span id="bookAuthor" class="reader-author"></span>
+      <span id="chapterTitle" class="reader-chapter"></span>
+    </div>
+    <span id="readerStatus" class="reader-chapter" role="status">Loading…</span>
+  </header>
+  <main class="reader-main">
+    <div id="readerError" class="reader-error" hidden></div>
+    <div id="readerText" class="reader-text" aria-label="Audiobook transcript"></div>
+  </main>
+  <section class="player-dock" aria-label="Audio controls">
+    <div class="player-inner">
+      <div class="seek-row">
+        <span id="currentTime">0:00</span>
+        <input id="seek" type="range" min="0" max="0" step="0.25" value="0" aria-label="Seek through audiobook">
+        <span id="totalTime">0:00</span>
+      </div>
+      <div class="compact-controls">
+        <div class="player-controls">
+          <button id="back15" type="button" aria-label="Back 15 seconds">−15</button>
+          <button id="playPause" class="play-button" type="button" aria-label="Play">▶</button>
+          <button id="forward30" type="button" aria-label="Forward 30 seconds">+30</button>
+        </div>
+        <button id="controlsToggle" class="controls-pill" type="button" aria-expanded="false" aria-controls="expandedControls">Controls ↑</button>
+      </div>
+      <div id="expandedControls" class="expanded-controls" hidden>
+        <label class="setting speed-setting">Speed
+          <select id="playbackRate" aria-label="Playback speed">
+            <option value="0.75">0.75×</option>
+            <option value="0.9">0.9×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.1">1.1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <div class="reader-settings">
+          <button id="fontDown" type="button" aria-label="Decrease text size">A−</button>
+          <button id="fontUp" type="button" aria-label="Increase text size">A+</button>
+          <label class="sync-control">Sync
+            <input id="syncOffset" type="range" min="-2000" max="2000" step="100" value="0" aria-label="Text synchronization offset">
+          </label>
+          <select id="highlightMode" aria-label="Highlight mode">
+            <option value="word">Word</option>
+            <option value="sentence">Sentence</option>
+            <option value="minimal">Minimal</option>
+          </select>
+          <button id="themeToggle" type="button" aria-label="Toggle dark mode">◐</button>
+        </div>
+      </div>
+    </div>
+  </section>
+  <audio id="audio" preload="metadata"></audio>
+  <script type="module" src="/reader.js"></script>
+</body>
+</html>
