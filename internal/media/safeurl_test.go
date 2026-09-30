@@ -249,6 +249,7 @@ func TestLibriVoxArchiveURLIsLimitedToArchiveOrg(t *testing.T) {
 		"https://archive.org/compress/book/formats=64KBPS%20MP3",
 		"https://ia801.us.archive.org/download/book.zip",
 		"https://dn801702.us.archive.org/zip_dir.php?path=%2F0%2Fitems%2Fbook.zip&formats=64KBPS%20MP3",
+		"https://ia801900.us.archive.org/zip_dir.php?path=%2F14%2Fitems%2Fanneofgreengablesversion9_2605_librivox.zip&formats=64KBPS%20MP3",
 	} {
 		if _, err := validateLibriVoxArchiveURL(raw); err != nil {
 			t.Errorf("rejected valid archive URL %q: %v", raw, err)
@@ -259,6 +260,9 @@ func TestLibriVoxArchiveURLIsLimitedToArchiveOrg(t *testing.T) {
 		"http://archive.org/compress/book.zip",
 		"https://archive.org/metadata/book",
 		"https://dn801702.us.archive.org/zip_dir.php?path=%2F0%2Fitems%2Fbook.txt&formats=64KBPS%20MP3",
+		"https://dn801702.us.archive.org/zip_dir.php?path=%2F14%2Fitems%2F..%2Fbook.zip&formats=64KBPS%20MP3",
+		"https://dn801702.us.archive.org/zip_dir.php?path=%2Fx%2Fitems%2Fbook.zip&formats=64KBPS%20MP3",
+		"https://dn801702.us.archive.org/zip_dir.php?path=%2F14%2Fitems%2Fbook.zip&formats=64KBPS%20MP3&other=https%3A%2F%2Fexample.invalid",
 		"https://example.com/download/book.zip",
 	} {
 		if _, err := validateLibriVoxArchiveURL(raw); err == nil {

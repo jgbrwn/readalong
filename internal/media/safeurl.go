@@ -72,14 +72,40 @@ func validateLibriVoxArchiveURL(raw string) (*url.URL, error) {
 	}
 	if u.Path == "/zip_dir.php" && strings.HasSuffix(host, ".archive.org") {
 		query := u.Query()
-		archivePath := query.Get("path")
-		format := query.Get("formats")
-		if strings.HasPrefix(archivePath, "/0/items/") &&
-			strings.HasSuffix(strings.ToLower(archivePath), ".zip") && strings.Contains(format, "MP3") {
+		paths, formats := query["path"], query["formats"]
+		if len(query) == 2 && len(paths) == 1 && len(formats) == 1 &&
+			validArchiveShardZipPath(paths[0]) && strings.Contains(strings.ToUpper(formats[0]), "MP3") {
 			return u, nil
 		}
 	}
 	return nil, fmt.Errorf("unsupported LibriVox archive URL")
+}
+
+// Archive.org storage redirects may use numeric shard directories such as
+// /0/items/ or /14/items/. Accept only one safe item ZIP path, not arbitrary
+// paths or nested directories.
+func validArchiveShardZipPath(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) != 4 || parts[0] != "" || parts[2] != "items" ||
+		len(parts[1]) > 8 || !digitsOnly(parts[1]) {
+		return false
+	}
+	filename := parts[3]
+	if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
+		return false
+	}
+	identifier := filename[:len(filename)-len(".zip")]
+	if identifier == "" || len(identifier) > 100 || identifier[0] == '.' || identifier[0] == '-' {
+		return false
+	}
+	for _, r := range identifier {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type urlValidator func(string) (*url.URL, error)

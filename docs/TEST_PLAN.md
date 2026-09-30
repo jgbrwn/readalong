@@ -24,6 +24,9 @@
   and constructs the Archive.org download URL from the validated item ID.
 - LibriVox chapter archive joins succeed when data, output, and work paths are
   relative, as they are with the default `APP_DATA_DIR=./data`.
+- Archive.org `zip_dir.php` redirects accept valid numbered storage shards
+  (for example `/14/items/`) while rejecting traversal and unrelated query
+  parameters.
 - A broken selected Gutenberg EPUB fails before the IA audiobook ZIP is
   downloaded.
 - IA match metadata cannot expose a ZIP/download URL to the client.

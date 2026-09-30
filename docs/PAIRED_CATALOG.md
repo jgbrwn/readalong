@@ -115,9 +115,10 @@ import form.
   never a user-supplied URL. The server re-fetches the provider record and
   derives or revalidates the Gutenberg ID from approved metadata/catalog data.
 - Archive.org ZIP requests are HTTPS-only, limited to Archive.org hosts, and
-  follow only Archive.org redirects. IA's compressed-MP3 endpoint redirects
-  to a `.zip` item path and MP3 format. DNS results are pinned and checked as
-  public before connection.
+  follow only Archive.org redirects. IA's compressed-MP3 endpoint may redirect
+  through a numeric storage shard such as `/14/items/`; Readalong permits only
+  one safe item `.zip` path with an MP3 format and no extra query keys. DNS
+  results are pinned and checked as public before connection.
 - ZIP extraction rejects traversal and symbolic links, caps the number of
   entries and aggregate uncompressed size, extracts MP3 tracks under generated
   local names, naturally sorts chapter filenames, and joins them with ffmpeg.
