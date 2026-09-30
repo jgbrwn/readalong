@@ -47,10 +47,15 @@ bookshelf or uploaded audiobook is shown.
 
 ## Demo
 
-![](https://github.com/user-attachments/assets/66a489ea-1274-4d17-9ae3-5267ac99715f)
+<p align="center">
+  <a href="https://github.com/jgbrwn/readalong/issues/1">
+    <img src="docs/assets/readalong-demo-poster.png" alt="Click to play the Readalong demo video" width="360">
+  </a>
+</p>
 
-The player above includes audio. Download the [optimized WebM](readalong-demo.webm)
-or [original MP4](readalong-demo.mp4) from the repository if preferred.
+GitHub strips inline video players from repository READMEs. Click the poster
+above to play the full recording with audio in GitHub's video player, or
+download the [optimized WebM](readalong-demo.webm) / [original MP4](readalong-demo.mp4).
 
 **Alignment caveat:** Readalong can now extract EPUB text and align it against
 the audiobook transcript. A source link or exact title/author candidate is not
