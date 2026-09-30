@@ -128,7 +128,9 @@ Other sources evaluated:
   ID in its metadata. Digitalbook's current Terms prohibit automated scraping
   without written permission, so Readalong must not crawl its pages. Filtered
   manual browsing is possible, but an automated integration should query
-  Archive.org directly and still solve the missing Gutenberg-text link.
+  Archive.org directly and still solve the missing Gutenberg-text link. The
+  page's record-specific LibriVox RSS feed responded from the VM, but that
+  known-ID feed is not a title-search API and did not provide a Gutenberg link.
 - **Project Gutenberg Open Audiobook Collection (TTS):** a promising future
   opt-in audio source, not integrated yet. Its public browse list links audio
   stored on IA, and IA metadata's `source` field contains a Gutenberg source
