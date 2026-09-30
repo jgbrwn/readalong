@@ -48,11 +48,13 @@ bookshelf or uploaded audiobook is shown.
 ## Demo
 
 <p align="center">
-  <video controls preload="metadata" width="720">
-    <source src="https://raw.githubusercontent.com/jgbrwn/readalong/main/readalong-demo.mp4" type="video/mp4">
-    <a href="readalong-demo.mp4">Play or download the Readalong demo</a>
-  </video>
+  <a href="https://pbnj.techpique.com/r/crispy-avocado-pretzel-chocolate-grinder">
+    <img src="docs/assets/readalong-demo-preview.gif" alt="Animated preview of the Readalong mobile reader">
+  </a>
 </p>
+
+The animated preview plays inline. Click it to open the full recording with
+audio; [download the MP4](readalong-demo.mp4) from the repository if preferred.
 
 **Alignment caveat:** Readalong can now extract EPUB text and align it against
 the audiobook transcript. A source link or exact title/author candidate is not
