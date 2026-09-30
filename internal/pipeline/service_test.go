@@ -171,6 +171,25 @@ func TestPairedBookRejectsInvalidEPUBBeforeDownloadingIAAudio(t *testing.T) {
 	}
 }
 
+func TestLibriVoxAcquireDiagnosticOmitsSourceURL(t *testing.T) {
+	dataDir := t.TempDir()
+	service := New(config.Config{DataDir: dataDir, MaxUploadBytes: 1 << 20}, nil)
+	book := db.Book{
+		SourceKind: "librivox",
+		SourceURL:  "https://example.invalid/audio.zip?token=must-not-be-logged",
+	}
+
+	_, _, err := service.acquire(context.Background(), db.Job{}, book, filepath.Join(dataDir, "book"))
+	if err == nil {
+		t.Fatal("unsupported archive URL unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "download chapter archive") ||
+		strings.Contains(err.Error(), "example.invalid") ||
+		strings.Contains(err.Error(), "must-not-be-logged") {
+		t.Fatalf("acquisition diagnostic is missing its phase or contains the source URL: %q", err)
+	}
+}
+
 func TestUploadedAudioAndEPUBAlignCanonicalText(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

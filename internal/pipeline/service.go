@@ -127,7 +127,15 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 	sourcePath, metadata, err := s.acquire(ctx, job, book, bookDir)
 	if err != nil {
 		if ctx.Err() == nil {
-			s.fail(ctx, job, stage, book, "Could not acquire the audio. Check the URL or uploaded file and retry.")
+			message := "Could not acquire the audio. Check the URL or uploaded file and retry."
+			if book.SourceKind == "librivox" {
+				// The underlying media helpers deliberately omit URLs and local
+				// paths from their errors, so this diagnostic is safe for the
+				// private service journal and useful when Archive.org fails.
+				log.Printf("readalong: job %s LibriVox audio acquisition failed: %v", job.ID, err)
+				message = "Could not download or assemble the audiobook archive from Archive.org. Try again later or select another recording."
+			}
+			s.fail(ctx, job, stage, book, message)
 		}
 		return
 	}
@@ -288,12 +296,12 @@ func (s *Service) acquire(ctx context.Context, job db.Job, book db.Book, bookDir
 		if fileMissingOrEmpty(path) {
 			if fileMissingOrEmpty(archivePath) {
 				if err := media.DownloadLibriVoxArchive(ctx, book.SourceURL, archivePath, s.cfg.MaxUploadBytes); err != nil {
-					return "", metadata, err
+					return "", metadata, fmt.Errorf("download chapter archive: %w", err)
 				}
 			}
 			if err := media.JoinLibriVoxArchive(ctx, archivePath, path,
 				filepath.Join(bookDir, "work", "librivox-tracks"), s.cfg.FFmpegBin, s.cfg.MaxUploadBytes); err != nil {
-				return "", metadata, err
+				return "", metadata, fmt.Errorf("validate or assemble chapter archive: %w", err)
 			}
 		}
 	default:
