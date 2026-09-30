@@ -69,8 +69,23 @@ verify the particular recording, text, and translation for your use.
 
 - A private exe.dev VM (or a localhost development environment).
 - Go 1.23 or newer, Python 3 with `venv`, `ffmpeg`, and `ffprobe`.
-- A Groq API key for transcription. `scripts/bootstrap-exe.sh` installs yt-dlp
-  with its EJS support and Deno.
+- A Groq API key for transcription; you can start with Groq's free tier.
+- `scripts/bootstrap-exe.sh` installs yt-dlp with its EJS support and Deno.
+
+## Groq API key (free to start)
+
+You can create a Groq account and API key on the free tier before adding a
+payment method. The [Groq Console sign-in page](https://console.groq.com/login)
+offers Google, GitHub, SSO, and email sign-in. Then create a key on the
+[API Keys page](https://console.groq.com/keys) and put it in the private,
+git-ignored `.env` as `GROQ_API_KEY=...`. Never commit or share the key.
+
+The free tier has model-specific rate limits; a long audiobook may pause at a
+limit. Readalong saves completed transcription chunks and automatically
+resumes queued work. Check Groq's [current rate limits](https://console.groq.com/docs/rate-limits)
+for the model and account. If you later need higher limits, upgrading to the
+Developer tier is optional and requires a payment method; see Groq's
+[Billing FAQs](https://console.groq.com/docs/billing-faqs).
 
 ## Data and privacy
 

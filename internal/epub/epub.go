@@ -60,12 +60,12 @@ func (d Document) HintPrompt() string {
 	if d.Author != "" {
 		parts = append(parts, d.Author)
 	}
-	for _, chapter := range d.Chapters {
-		if chapter.Title != "" && len(parts) < 8 {
-			parts = append(parts, chapter.Title)
-		}
+	if len(parts) == 0 {
+		return ""
 	}
-	prompt := "Audiobook title and chapter/name hints: " + strings.Join(parts, "; ")
+	// This prompt is repeated for every audio chunk. Chapter headings from
+	// elsewhere in the book can bias ASR toward the wrong chapter number.
+	prompt := "Audiobook title and author: " + strings.Join(parts, "; ")
 	runes := []rune(prompt)
 	if len(runes) > 420 {
 		prompt = string(runes[:420])

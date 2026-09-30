@@ -538,6 +538,32 @@ func TestMultipartAudioEPUBImportCreatesAlignedBook(t *testing.T) {
 	}
 }
 
+func TestRetryEndpointReturnsEmptyAcceptedResponse(t *testing.T) {
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound}
+	d, handler := testServer(t, cfg)
+	ctx := context.Background()
+	_ = request(handler, http.MethodGet, "/api/me", "retry-owner", "retry@example.org", "")
+	if err := d.CreateBookAndJob(ctx, db.NewBook{
+		ID: "retry-book", JobID: "retry-job", OwnerUserID: "retry-owner",
+		Title: "Retry test", SourceKind: "upload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FailJob(ctx, "retry-job", "acquiring", "error", "test failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := request(handler, http.MethodPost, "/api/books/retry-book/retry",
+		"retry-owner", "retry@example.org", "")
+	if response.Code != http.StatusAccepted || response.Body.Len() != 0 {
+		t.Fatalf("retry response = %d %q, want empty 202", response.Code, response.Body.String())
+	}
+	job, err := d.JobStatus(ctx, "retry-book")
+	if err != nil || job.Status != "queued" {
+		t.Fatalf("retry job state = %#v, err=%v", job, err)
+	}
+}
+
 func httpTestEPUB(t *testing.T) []byte {
 	t.Helper()
 	var buffer bytes.Buffer

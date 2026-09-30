@@ -70,6 +70,11 @@
 - Kill process halfway through; completed chunks are reused after restart.
 - Simulated 429 stores retry time and resumes later.
 - A successfully transcribed first chunk remains readable while later chunks are queued.
+- For aligned books with no completed alignment, the partial ASR view is marked
+  provisional while transcription is running or rate-limited.
+- EPUB chapter headings are not sent as generic ASR hints to every chunk.
+- A retry response with HTTP 202 and an empty body is handled as a successful
+  queue operation, not parsed as JSON.
 - Re-transcription preserves the existing transcript/alignment and reading
   progress when a fresh Groq pass fails or is rate-limited.
 - A successful re-transcription atomically publishes a new transcript and

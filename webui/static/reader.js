@@ -35,8 +35,9 @@ async function api(path, options = {}) {
     const message = (await response.text()).trim();
     throw new Error(message || `Request failed (${response.status})`);
   }
-  if (response.status === 204) return null;
-  return response.json();
+  const body = await response.text();
+  // Queued jobs (202) and no-content responses intentionally have no JSON.
+  return body.trim() ? JSON.parse(body) : null;
 }
 
 function formatTime(seconds) {
@@ -238,6 +239,13 @@ function updateModeToggle(value = book) {
 function updateAlignmentNotice(data) {
   const notice = $('#alignmentNotice');
   const quality = Number(data.alignment_quality ?? data.book?.alignment_quality) || 0;
+  if (readerMode === 'transcript' && data.alignment_pending) {
+    notice.hidden = false;
+    notice.textContent = data.book?.stage === 'rate_limited'
+      ? 'Showing a partial Groq transcript paused at a rate limit. Chapter labels and names can be misheard; confident EPUB text will appear after alignment.'
+      : 'Showing a provisional Groq transcript. Chapter labels and names can be misheard; confident EPUB text will appear after alignment.';
+    return;
+  }
   if (readerMode !== 'ebook' || quality >= 0.75) {
     notice.hidden = true;
     notice.textContent = '';

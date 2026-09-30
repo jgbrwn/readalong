@@ -12,8 +12,8 @@ async function api(path, options = {}) {
     const detail = (await response.text()).trim();
     throw new Error(detail || `Request failed (${response.status})`);
   }
-  if (response.status === 204) return null;
-  return response.json();
+  const body = await response.text();
+  return body.trim() ? JSON.parse(body) : null;
 }
 
 function escapeHTML(value) {

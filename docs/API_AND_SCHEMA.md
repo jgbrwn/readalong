@@ -97,6 +97,13 @@ Mutating API requests require a same-origin `Origin` header. All book-specific
 routes enforce stable-ID ownership, including audio ranges and event streams.
 Filesystem paths and source URLs are never returned to clients.
 
+### POST /api/books/:id/retry
+
+Re-queues the latest failed book-processing job for its owner. Returns
+`202 Accepted` with an empty response body; clients must not expect JSON.
+Groq rate-limited jobs are already queued with a resume time and do not need
+this endpoint.
+
 Every authenticated identity is created or updated on its first API request.
 There is no app-level email allowlist by default; the private exe.dev proxy
 controls access to the VM. Admin bootstrap emails are one-time claims that

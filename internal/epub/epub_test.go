@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,27 @@ func TestParseSpineAndExtractSemanticText(t *testing.T) {
 	}
 	if got := doc.Chapters[0].Blocks[1].Sentences[1].Words[0]; got != "This" {
 		t.Fatalf("second sentence first word = %q", got)
+	}
+}
+
+func TestHintPromptUsesIdentityWithoutFutureChapterHeadings(t *testing.T) {
+	doc := Document{
+		Title:  "Anne of Green Gables",
+		Author: "L. M. Montgomery",
+		Chapters: []Chapter{
+			{Title: "CHAPTER I. Mrs. Rachel Lynde Is Surprised"},
+			{Title: "CHAPTER IV. Morning at Green Gables"},
+		},
+	}
+	prompt := doc.HintPrompt()
+	if !strings.Contains(prompt, doc.Title) || !strings.Contains(prompt, doc.Author) {
+		t.Fatalf("prompt lost book identity: %q", prompt)
+	}
+	if strings.Contains(prompt, "CHAPTER I") || strings.Contains(prompt, "CHAPTER IV") {
+		t.Fatalf("prompt includes chapter headings that may bias a chunk transcript: %q", prompt)
+	}
+	if got := (Document{}).HintPrompt(); got != "" {
+		t.Fatalf("empty document hint = %q, want empty", got)
 	}
 }
 
