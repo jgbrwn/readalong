@@ -39,6 +39,7 @@ type Service struct {
 }
 
 func New(cfg config.Config, d *db.DB) *Service {
+	cfg = cfg.Normalize()
 	return &Service{
 		cfg: cfg, db: d,
 		tools: media.Tools{

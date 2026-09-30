@@ -22,6 +22,10 @@ Optional future durable layer (Phase 3; not enabled by default)
    `- rclone -> private Cloudflare R2 (book assets)
 ```
 
+`APP_DATA_DIR` is resolved to an absolute path at startup. This keeps media,
+EPUB, and transcript paths stable when a subprocess such as FFmpeg runs from a
+different working directory.
+
 ## Why this over Cloudflare Workers + D1
 
 The workload includes native media tooling, long-running ingestion, large files, resumable background work, and exe.dev-provided identity. A normal persistent VM is the natural execution environment. exe.dev explicitly supports normal persistent disks and SQLite. D1/Workers would split one simple stateful app into several services without solving a real v1 problem.

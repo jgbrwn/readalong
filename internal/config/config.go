@@ -3,6 +3,7 @@ package config
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -55,7 +56,21 @@ func Load() Config {
 		DenoBin:              env("DENO_BIN", ""),
 	}
 	stripDeploymentSecrets()
-	return cfg
+	return cfg.Normalize()
+}
+
+// Normalize resolves the persistent data root once so paths remain stable
+// when subprocesses such as FFmpeg run with a different working directory.
+func (c Config) Normalize() Config {
+	if strings.TrimSpace(c.DataDir) == "" {
+		return c
+	}
+	if absolute, err := filepath.Abs(c.DataDir); err == nil {
+		c.DataDir = absolute
+	} else {
+		c.DataDir = filepath.Clean(c.DataDir)
+	}
+	return c
 }
 
 // API credentials are copied into the narrow consumers that need them, not

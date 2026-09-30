@@ -4,6 +4,9 @@
 
 - Upload MP3.
 - Upload M4B with chapter metadata.
+- Process manual audio upload with relative `APP_DATA_DIR`.
+- Process manual audio + EPUB upload with relative `APP_DATA_DIR` through
+  normalization, transcription, and alignment.
 - Direct MP3 URL.
 - YouTube normal video/audiobook URL without cookies or yt-dlp config.
 - YouTube fallback client path.
@@ -19,6 +22,8 @@
   confirmation before import.
 - IA import re-fetches metadata, verifies collection/media type/public MP3,
   and constructs the Archive.org download URL from the validated item ID.
+- LibriVox chapter archive joins succeed when data, output, and work paths are
+  relative, as they are with the default `APP_DATA_DIR=./data`.
 - A broken selected Gutenberg EPUB fails before the IA audiobook ZIP is
   downloaded.
 - IA match metadata cannot expose a ZIP/download URL to the client.

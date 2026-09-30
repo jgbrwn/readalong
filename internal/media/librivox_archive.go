@@ -20,6 +20,18 @@ func JoinLibriVoxArchive(ctx context.Context, archivePath, outputPath, workDir, 
 	if maxBytes <= 0 {
 		return fmt.Errorf("invalid archive limit")
 	}
+	// FFmpeg runs with its working directory set to workDir. Resolve these
+	// paths first so relative APP_DATA_DIR values do not get interpreted
+	// relative to workDir a second time.
+	absoluteWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return fmt.Errorf("could not prepare chapter work directory")
+	}
+	absoluteOutputPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return fmt.Errorf("could not prepare joined audio path")
+	}
+	workDir, outputPath = absoluteWorkDir, absoluteOutputPath
 	zr, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("LibriVox archive is invalid")

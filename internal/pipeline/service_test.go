@@ -48,8 +48,8 @@ func TestUploadedAudioRunsThroughFirstUsableTranscript(t *testing.T) {
 	}))
 	defer groqServer.Close()
 
-	dataDir := t.TempDir()
-	d, err := db.Open(filepath.Join(dataDir, "data"))
+	dataRoot := relativeTestDataRoot(t)
+	d, err := db.Open(dataRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestUploadedAudioRunsThroughFirstUsableTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	bookID, jobID := "test-book", "test-job"
-	bookDir := BookDirectory(filepath.Join(dataDir, "data"), "owner-1", bookID)
+	bookDir := BookDirectory(dataRoot, "owner-1", bookID)
 	sourceDir := filepath.Join(bookDir, "source")
 	if err := os.MkdirAll(sourceDir, 0700); err != nil {
 		t.Fatal(err)
@@ -70,7 +70,6 @@ func TestUploadedAudioRunsThroughFirstUsableTranscript(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("make test audio: %v: %s", err, output)
 	}
-	dataRoot := filepath.Join(dataDir, "data")
 	audioRel, err := filepath.Rel(dataRoot, source)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +216,7 @@ func TestUploadedAudioAndEPUBAlignCanonicalText(t *testing.T) {
 	}))
 	defer groqServer.Close()
 
-	dataRoot := filepath.Join(t.TempDir(), "data")
+	dataRoot := relativeTestDataRoot(t)
 	d, err := db.Open(dataRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -287,6 +286,20 @@ func TestUploadedAudioAndEPUBAlignCanonicalText(t *testing.T) {
 		result.Sentences.Sentences[0].Words[0].Confidence == 0 {
 		t.Fatalf("unexpected alignment artifact: %#v", result)
 	}
+}
+
+func relativeTestDataRoot(t *testing.T) string {
+	t.Helper()
+	absoluteRoot := filepath.Join(t.TempDir(), "data")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeRoot, err := filepath.Rel(cwd, absoluteRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relativeRoot
 }
 
 func writePipelineEPUB(t *testing.T, filename string) {

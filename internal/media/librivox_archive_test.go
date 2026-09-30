@@ -65,6 +65,27 @@ func TestJoinLibriVoxArchive(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "work")); !os.IsNotExist(err) {
 		t.Fatalf("chapter work data was not cleaned: %v", err)
 	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeRoot, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeOutput := filepath.Join(relativeRoot, "joined-relative.mp3")
+	relativeWork := filepath.Join(relativeRoot, "work-relative")
+	if err := JoinLibriVoxArchive(context.Background(), filepath.Join(relativeRoot, "book.zip"),
+		relativeOutput, relativeWork, ffmpeg, 2<<20); err != nil {
+		t.Fatalf("join with relative data paths: %v", err)
+	}
+	if err := ValidateAudioFile(relativeOutput); err != nil {
+		t.Fatalf("relative-path joined output is not valid MP3: %v", err)
+	}
+	if _, err := os.Stat(relativeWork); !os.IsNotExist(err) {
+		t.Fatalf("relative chapter work data was not cleaned: %v", err)
+	}
 }
 
 func TestJoinLibriVoxArchiveRejectsTraversal(t *testing.T) {

@@ -480,7 +480,15 @@ func TestMultipartYouTubeImportIsProvisionedAndOwnerScoped(t *testing.T) {
 }
 
 func TestMultipartAudioEPUBImportCreatesAlignedBook(t *testing.T) {
-	dataDir := t.TempDir()
+	absoluteDataDir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir, err := filepath.Rel(cwd, absoluteDataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound, DataDir: dataDir}
 	d, handler := testServer(t, cfg)
 	var body bytes.Buffer
@@ -522,6 +530,11 @@ func TestMultipartAudioEPUBImportCreatesAlignedBook(t *testing.T) {
 	stored, err := d.BookForUser(httptest.NewRequest(http.MethodGet, "/", nil).Context(), "ebook-owner", book.ID)
 	if err != nil || stored.EpubRelPath == "" {
 		t.Fatalf("stored EPUB path missing: book=%#v err=%v", stored, err)
+	}
+	for _, rel := range []string{stored.AudioRelPath, stored.EpubRelPath} {
+		if _, err := os.Stat(filepath.Join(dataDir, rel)); err != nil {
+			t.Fatalf("uploaded media missing under relative data dir: %s: %v", rel, err)
+		}
 	}
 }
 

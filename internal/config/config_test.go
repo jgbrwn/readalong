@@ -2,8 +2,35 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestNormalizeResolvesRelativeDataDir(t *testing.T) {
+	cfg := (Config{DataDir: "./data"}).Normalize()
+	want, err := filepath.Abs("./data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != want {
+		t.Fatalf("normalized data dir = %q, want %q", cfg.DataDir, want)
+	}
+	if got := (Config{}).Normalize(); got.DataDir != "" {
+		t.Fatalf("empty data dir became %q", got.DataDir)
+	}
+}
+
+func TestLoadResolvesRelativeAppDataDir(t *testing.T) {
+	t.Setenv("APP_DATA_DIR", "./data")
+	cfg := Load()
+	want, err := filepath.Abs("./data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != want {
+		t.Fatalf("loaded data dir = %q, want absolute %q", cfg.DataDir, want)
+	}
+}
 
 func TestLoopbackAddrIsFixedAndPortConfigurable(t *testing.T) {
 	if got := loopbackAddr("8123"); got != "127.0.0.1:8123" {

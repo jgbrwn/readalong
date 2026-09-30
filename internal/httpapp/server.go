@@ -26,6 +26,7 @@ type Server struct {
 }
 
 func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler {
+	cfg = cfg.Normalize()
 	catalogClient := catalog.NewClient()
 	catalogClient.EnableArchiveSearch()
 	if cfg.DataDir != "" {
@@ -35,6 +36,7 @@ func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler
 }
 
 func NewWithCatalog(cfg config.Config, d *db.DB, catalogClient *catalog.Client, workers ...*pipeline.Service) http.Handler {
+	cfg = cfg.Normalize()
 	if catalogClient == nil {
 		catalogClient = catalog.NewClient()
 	}
