@@ -121,6 +121,14 @@ Other sources evaluated:
   This is a useful alternate catalog/file host for the same LibriVox
   recordings, not an independent narration corpus; matching an EPUB needs
   separate validation.
+- **Digitalbook.io:** its search combines free LibriVox entries with paid
+  Audible/Apple listings. A tested free **Anne of Green Gables** result pointed
+  to chapter MP3s hosted on Archive.org; the matching IA item is in
+  `librivoxaudio`, carries public-domain license metadata, and has no Gutenberg
+  ID in its metadata. Digitalbook's current Terms prohibit automated scraping
+  without written permission, so Readalong must not crawl its pages. Filtered
+  manual browsing is possible, but an automated integration should query
+  Archive.org directly and still solve the missing Gutenberg-text link.
 - **Project Gutenberg Open Audiobook Collection (TTS):** a promising future
   opt-in audio source, not integrated yet. Its public browse list links audio
   stored on IA, and IA metadata's `source` field contains a Gutenberg source
@@ -162,6 +170,8 @@ if the LibriVox site/API is temporarily unavailable.
   https://www.gutenberg.org/policy/linking.html
 - Project Gutenberg terms:
   https://www.gutenberg.org/policy/terms_of_use.html
+- Digitalbook.io Terms & Conditions:
+  https://www.digitalbook.io/terms
 - Gutenberg mirror list:
   https://www.gutenberg.org/MIRRORS.ALL
 - Loyal Books About:

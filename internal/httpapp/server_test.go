@@ -18,6 +18,7 @@ import (
 	"github.com/jgbrwn/readalong/internal/catalog"
 	"github.com/jgbrwn/readalong/internal/config"
 	"github.com/jgbrwn/readalong/internal/db"
+	"github.com/jgbrwn/readalong/internal/pipeline"
 	"github.com/jgbrwn/readalong/internal/transcript"
 )
 
@@ -76,6 +77,64 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	outsider := request(handler, http.MethodGet, "/api/books", "other-user", "other@example.org", "")
 	if outsider.Code != http.StatusOK || strings.Contains(outsider.Body.String(), book.ID) {
 		t.Fatalf("catalog book crossed owner boundary: %d %s", outsider.Code, outsider.Body)
+	}
+}
+
+func TestRetranscribeEndpointQueuesFreshJobWithoutReplacingCurrentTranscript(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.Config{
+		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
+		DataDir: dataDir, GroqAPIKey: "test-key",
+	}
+	d, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	handler := New(cfg, d, pipeline.New(cfg, d))
+	_ = request(handler, http.MethodGet, "/api/me", "retranscribe-owner", "owner@example.org", "")
+	if err := d.CreateBookAndJob(context.Background(), db.NewBook{
+		ID: "retranscribe-book", JobID: "initial-job", OwnerUserID: "retranscribe-owner",
+		Title: "Test book", SourceKind: "upload", AudioRelPath: "books/test/playback.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTranscriptPath(context.Background(), "retranscribe-book", "books/test/old/transcript.v1.json.gz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteJob(context.Background(), "initial-job"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := request(handler, http.MethodPost, "/api/books/retranscribe-book/retranscribe",
+		"retranscribe-owner", "owner@example.org", "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("re-transcribe status = %d: %s", response.Code, response.Body)
+	}
+	var book db.Book
+	if err := json.Unmarshal(response.Body.Bytes(), &book); err != nil {
+		t.Fatal(err)
+	}
+	if book.Status != "ready" || book.JobStatus != "queued" {
+		t.Fatalf("unexpected queued book response: %#v", book)
+	}
+	stored, err := d.BookByID(context.Background(), "retranscribe-book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "ready" || stored.TranscriptRelPath != "books/test/old/transcript.v1.json.gz" {
+		t.Fatalf("queueing replaced or hid the current transcript: %#v", stored)
+	}
+
+	outsider := request(handler, http.MethodPost, "/api/books/retranscribe-book/retranscribe",
+		"other-user", "other@example.org", "")
+	if outsider.Code != http.StatusNotFound {
+		t.Fatalf("other owner could retranscribe book: status=%d body=%s", outsider.Code, outsider.Body)
+	}
+	busy := request(handler, http.MethodPost, "/api/books/retranscribe-book/retranscribe",
+		"retranscribe-owner", "owner@example.org", "")
+	if busy.Code != http.StatusConflict {
+		t.Fatalf("duplicate re-transcription status = %d: %s", busy.Code, busy.Body)
 	}
 }
 

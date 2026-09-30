@@ -114,6 +114,131 @@ func TestShelfSearchIsOwnerScopedAndMatchesTitleOrAuthor(t *testing.T) {
 	}
 }
 
+func TestQueueRetranscriptionKeepsCurrentArtifactsAndRejectsDuplicates(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "retranscribe-owner", "owner@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "book", JobID: "initial-job", OwnerUserID: "retranscribe-owner",
+		Title: "Test Book", SourceKind: "upload", AudioRelPath: "books/test/playback.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTranscriptPath(ctx, "book", "books/test/transcript.v1.json.gz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetAlignment(ctx, "book", "books/test/alignment.v1.json.gz", 0.82); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteJob(ctx, "initial-job"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.QueueRetranscription(ctx, "retranscribe-owner", "book", "fresh-job"); err != nil {
+		t.Fatal(err)
+	}
+	book, err := d.BookByID(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Status != "ready" || book.TranscriptRelPath != "books/test/transcript.v1.json.gz" ||
+		book.AlignmentRelPath != "books/test/alignment.v1.json.gz" || book.AudioRelPath != "books/test/playback.mp3" {
+		t.Fatalf("queueing changed live book artifacts: %#v", book)
+	}
+	job, err := d.JobStatus(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != "fresh-job" || job.Kind != "retranscribe" || job.Status != "queued" {
+		t.Fatalf("unexpected fresh-transcription job: %#v", job)
+	}
+	if err := d.QueueRetranscription(ctx, "retranscribe-owner", "book", "duplicate-job"); err != ErrBookJobInProgress {
+		t.Fatalf("second active run error = %v, want ErrBookJobInProgress", err)
+	}
+	if err := d.QueueRetranscription(ctx, "other-owner", "book", "other-user-job"); err != ErrBookNotFound {
+		t.Fatalf("cross-owner queue error = %v, want ErrBookNotFound", err)
+	}
+
+	quality := 0.91
+	if err := d.SetTranscriptionArtifacts(ctx, "book", "books/test/fresh/transcript.v1.json.gz",
+		"books/test/fresh/alignment.v1.json.gz", &quality); err != nil {
+		t.Fatal(err)
+	}
+	book, err = d.BookByID(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.TranscriptRelPath != "books/test/fresh/transcript.v1.json.gz" ||
+		book.AlignmentRelPath != "books/test/fresh/alignment.v1.json.gz" ||
+		book.AlignmentQuality == nil || *book.AlignmentQuality != quality {
+		t.Fatalf("fresh artifact pointers were not published together: %#v", book)
+	}
+}
+
+func TestQueueRetranscriptionRequiresReadyBookAndExistingTranscript(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "retranscribe-owner", "owner@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "book", JobID: "initial-job", OwnerUserID: "retranscribe-owner",
+		Title: "Processing Book", SourceKind: "upload", AudioRelPath: "books/test/playback.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueueRetranscription(ctx, "retranscribe-owner", "book", "fresh-job"); err != ErrBookJobInProgress {
+		t.Fatalf("active initial job error = %v, want ErrBookJobInProgress", err)
+	}
+	if err := d.CompleteJob(ctx, "initial-job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueueRetranscription(ctx, "retranscribe-owner", "book", "fresh-job"); err != ErrRetranscriptionNotReady {
+		t.Fatalf("book without transcript error = %v, want ErrRetranscriptionNotReady", err)
+	}
+}
+
+func TestGenericRetryDoesNotDuplicateOrRetryRetranscriptionJobs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "retranscribe-owner", "owner@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "book", JobID: "initial-job", OwnerUserID: "retranscribe-owner",
+		Title: "Test book", SourceKind: "upload", AudioRelPath: "books/test/playback.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTranscriptPath(ctx, "book", "books/test/old/transcript.v1.json.gz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FailJob(ctx, "initial-job", "transcribing", "ready", "first pass failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueueRetranscription(ctx, "retranscribe-owner", "book", "fresh-job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RetryJob(ctx, "retranscribe-owner", "book"); err == nil {
+		t.Fatal("generic retry should not queue a second job while a fresh pass is active")
+	}
+	if err := d.FailJob(ctx, "fresh-job", "retranscribing", "ready", "fresh pass failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RetryJob(ctx, "retranscribe-owner", "book"); err == nil {
+		t.Fatal("generic retry should not re-run a failed fresh-transcription job")
+	}
+	job, err := d.JobStatus(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != "fresh-job" || job.Kind != "retranscribe" || job.Status != "error" {
+		t.Fatalf("unexpected final job state: %#v", job)
+	}
+}
+
 func TestOpenMigratesOlderUsersTable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.db")

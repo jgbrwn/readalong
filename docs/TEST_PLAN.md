@@ -45,6 +45,13 @@
 - Kill process halfway through; completed chunks are reused after restart.
 - Simulated 429 stores retry time and resumes later.
 - A successfully transcribed first chunk remains readable while later chunks are queued.
+- Re-transcription preserves the existing transcript/alignment and reading
+  progress when a fresh Groq pass fails or is rate-limited.
+- A successful re-transcription atomically publishes a new transcript and
+  alignment, while prior artifacts remain recoverable and completed fresh
+  chunks resume after restart.
+- Re-transcription is owner-scoped, rejects duplicate active jobs, and never
+  re-downloads or mutates the book's audio/EPUB.
 - Invalid API key creates actionable error without leaking the key.
 
 ## Sync engine

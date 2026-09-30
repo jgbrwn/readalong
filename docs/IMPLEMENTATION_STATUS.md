@@ -11,7 +11,8 @@ Implemented:
 - loopback-only server configuration and systemd installation;
 - audio upload, YouTube acquisition, SSRF-protected direct-media downloads,
   playback normalization, chunked Groq transcription, resumable jobs, and
-  absolute word timestamps;
+  absolute word timestamps; user-triggered re-transcription now uses an
+  isolated resumable run and only replaces the active transcript after success;
 - owner-scoped bookshelf, title/author search, Range-capable playback, reader
   windows, progress persistence, and the mobile-first PWA.
 

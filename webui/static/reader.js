@@ -513,11 +513,16 @@ function flushProgress() {
 
 function connectProgress() {
   if (!('EventSource' in window)) return;
+  let sawActiveRetranscription = false;
   const stream = new EventSource(`/api/books/${encodeURIComponent(bookID)}/events`);
-  stream.addEventListener('progress', (event) => {
+  stream.addEventListener('progress', async (event) => {
     let data;
     try { data = JSON.parse(event.data); } catch { return; }
-    if (data.error) showError(data.error, data.job_status === 'error');
+    if (data.job_kind === 'retranscribe' &&
+        (data.job_status === 'queued' || data.job_status === 'running')) {
+      sawActiveRetranscription = true;
+    }
+    if (data.error) showError(data.error, data.job_status === 'error' && data.job_kind !== 'retranscribe');
     if (!ready) {
       setStatus(statusLabel(data));
       if (data.status === 'ready') {
@@ -525,9 +530,20 @@ function connectProgress() {
       }
     } else if (data.stage === 'transcribing' && data.status === 'ready') {
       setStatus('Ready · more words on the way');
+    } else if (data.stage === 'retranscribing' && data.status === 'ready') {
+      setStatus(`Refreshing transcript · ${Math.round((data.progress || 0) * 100)}% · current text remains available`);
+    } else if (data.stage === 'aligning_retranscription') {
+      setStatus('New transcript ready · aligning EPUB');
+    } else if (data.stage === 'rate_limited' && data.status === 'ready') {
+      setStatus('Groq rate-limited · current transcript remains available');
     }
     if (data.job_status === 'completed' || data.job_status === 'error') {
       stream.close();
+      if (data.job_status === 'completed' && data.job_kind === 'retranscribe' && sawActiveRetranscription) {
+        await refreshBookMode();
+        setStatus('Fresh transcript ready');
+        return;
+      }
       const alignmentStillPending = !Number.isFinite(Number(book?.alignment_quality));
       if (data.job_status === 'completed' && book?.mode === 'aligned' && alignmentStillPending) {
         refreshBookMode();

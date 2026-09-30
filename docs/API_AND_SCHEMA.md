@@ -86,6 +86,7 @@ GET    /api/books/:id/audio        Range-capable local media response
 GET    /api/books/:id/events       SSE processing progress
 PUT    /api/books/:id/progress
 POST   /api/books/:id/retry
+POST   /api/books/:id/retranscribe
 GET    /api/discovery/pairs?q=title
 POST   /api/discovery/pairs/:id/import
 GET    /api/admin/users           admin only
@@ -142,6 +143,16 @@ coverage is at least 75%, otherwise it shows the audio transcript. Unmatched
 ebook words have no timestamps and are never given a moving word highlight.
 The reader fetches the active window rather than mounting an entire book in
 the DOM.
+
+### POST /api/books/:id/retranscribe
+
+Queues a fresh Groq transcription of the book's existing normalized audio.
+The book must be ready and already have a transcript. A job-specific work
+directory keeps new chunk responses separate from the current version and
+resumes them after restarts/rate limits. The current transcript, EPUB,
+alignment, and reading progress remain active until the complete transcript
+and (when applicable) its alignment are ready; one database update switches
+the artifact pointers together.
 
 ### GET /api/books/:id/audio
 

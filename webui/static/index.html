@@ -83,6 +83,22 @@
     </form>
   </dialog>
 
+  <dialog id="retranscribeDialog" class="sheet retranscribe-sheet">
+    <div class="retranscribe-content">
+      <button type="button" class="close-button" id="closeRetranscribe" aria-label="Close">×</button>
+      <p class="eyebrow">FRESH TRANSCRIPT</p>
+      <h2>Re-transcribe this book?</h2>
+      <p id="retranscribeTitle" class="retranscribe-book-title"></p>
+      <p class="muted">Readalong will send the saved audio to Groq again. This uses your configured transcription quota and may take a while.</p>
+      <p class="retranscribe-safety">Your current transcript, audio, EPUB, and reading progress stay available until the fresh transcript and alignment (when applicable) finish successfully. If transcription fails or hits a rate limit, the current version is kept.</p>
+      <p id="retranscribeError" class="form-message" role="status"></p>
+      <div class="retranscribe-actions">
+        <button id="cancelRetranscribe" class="button button-quiet" type="button">Keep current</button>
+        <button id="confirmRetranscribe" class="button" type="button">Re-transcribe</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="discoverDialog" class="sheet discover-sheet">
     <div class="discover-content">
       <button type="button" class="close-button" id="closeDiscover" aria-label="Close">×</button>

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	_ "modernc.org/sqlite"
 	"os"
@@ -11,6 +12,12 @@ import (
 )
 
 type DB struct{ *sql.DB }
+
+var (
+	ErrBookNotFound            = errors.New("book not found")
+	ErrRetranscriptionNotReady = errors.New("book is not ready for re-transcription")
+	ErrBookJobInProgress       = errors.New("book already has a job in progress")
+)
 
 type Book struct {
 	ID                string   `json:"id"`
@@ -278,7 +285,7 @@ const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b
 	COALESCE(b.alignment_relpath,''),b.alignment_quality,COALESCE(b.gutenberg_id,''),
 	COALESCE(b.ebook_source_url,'')
 	FROM books b
-	LEFT JOIN jobs j ON j.id=(SELECT j2.id FROM jobs j2 WHERE j2.book_id=b.id ORDER BY j2.created_at DESC LIMIT 1)
+	LEFT JOIN jobs j ON j.id=(SELECT j2.id FROM jobs j2 WHERE j2.book_id=b.id ORDER BY j2.created_at DESC,j2.rowid DESC LIMIT 1)
 	LEFT JOIN reading_progress p ON p.book_id=b.id AND p.user_id=b.owner_user_id`
 
 type rowScanner interface {
@@ -345,6 +352,53 @@ func (d *DB) CreateBookAndJob(ctx context.Context, in NewBook) error {
 	return tx.Commit()
 }
 
+// QueueRetranscription atomically admits one fresh transcription run for an
+// already-ready, owner-scoped book that has both audio and an existing transcript.
+func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := d.ExecContext(ctx, `INSERT INTO jobs
+		(id,owner_user_id,book_id,kind,status,stage,progress,created_at,updated_at)
+		SELECT ?,?,?,'retranscribe','queued','retranscribing',0,?,?
+		WHERE EXISTS (
+			SELECT 1 FROM books b
+			WHERE b.id=? AND b.owner_user_id=? AND b.status='ready'
+				AND COALESCE(b.audio_relpath,'')<>'' AND COALESCE(b.transcript_relpath,'')<>''
+		) AND NOT EXISTS (
+			SELECT 1 FROM jobs j
+			WHERE j.book_id=? AND j.owner_user_id=? AND j.status IN ('queued','running')
+		)`, jobID, ownerID, bookID, now, now, bookID, ownerID, bookID, ownerID)
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 1 {
+		return nil
+	}
+	var exists, ready, active int
+	err = d.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?),
+		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=? AND status='ready'
+			AND COALESCE(audio_relpath,'')<>'' AND COALESCE(transcript_relpath,'')<>''),
+		EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND owner_user_id=? AND status IN ('queued','running'))`,
+		bookID, ownerID, bookID, ownerID, bookID, ownerID).Scan(&exists, &ready, &active)
+	if err != nil {
+		return err
+	}
+	switch {
+	case exists == 0:
+		return ErrBookNotFound
+	case active != 0:
+		return ErrBookJobInProgress
+	case ready == 0:
+		return ErrRetranscriptionNotReady
+	default:
+		return ErrBookJobInProgress
+	}
+}
+
 func nullableString(s string) any {
 	if s == "" {
 		return nil
@@ -385,6 +439,33 @@ func (d *DB) SetTranscriptPath(ctx context.Context, id, transcriptRelPath string
 	_, err := d.ExecContext(ctx, `UPDATE books SET transcript_relpath=?,updated_at=? WHERE id=?`,
 		transcriptRelPath, now, id)
 	return err
+}
+
+// SetTranscriptionArtifacts switches the public transcript/alignment pointers
+// in one SQLite statement after the complete fresh generation is on disk.
+func (d *DB) SetTranscriptionArtifacts(ctx context.Context, id, transcriptRelPath, alignmentRelPath string, quality *float64) error {
+	if transcriptRelPath == "" {
+		return fmt.Errorf("transcript path is required")
+	}
+	var alignmentQuality any
+	if quality != nil {
+		alignmentQuality = *quality
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := d.ExecContext(ctx, `UPDATE books SET transcript_relpath=?,alignment_relpath=?,
+		alignment_quality=?,updated_at=? WHERE id=?`,
+		transcriptRelPath, nullableString(alignmentRelPath), alignmentQuality, now, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrBookNotFound
+	}
+	return nil
 }
 
 func (d *DB) SetBookAudioPath(ctx context.Context, id, audioRelPath string) error {
@@ -495,7 +576,7 @@ func (d *DB) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	err = tx.QueryRowContext(ctx, `SELECT id,owner_user_id,book_id,kind,status,stage,progress,attempt,
 		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs
 		WHERE status='queued' AND (not_before_at IS NULL OR not_before_at<=?)
-		ORDER BY created_at LIMIT 1`, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
+		ORDER BY created_at,rowid LIMIT 1`, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
 		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
 	if err == sql.ErrNoRows {
 		return Job{}, false, nil
@@ -606,8 +687,15 @@ func (d *DB) RetryJob(ctx context.Context, ownerID, bookID string) error {
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE jobs SET status='queued',stage='queued',error=NULL,
-		not_before_at=NULL,updated_at=? WHERE book_id=? AND owner_user_id=? AND status='error'`,
-		now, bookID, ownerID)
+		not_before_at=NULL,updated_at=? WHERE id=(
+			SELECT j.id FROM jobs j
+			WHERE j.book_id=? AND j.owner_user_id=? AND j.kind='book' AND j.status='error'
+				AND j.id=(SELECT latest.id FROM jobs latest WHERE latest.book_id=j.book_id
+					ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)
+				AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.book_id=j.book_id
+					AND active.status IN ('queued','running'))
+			LIMIT 1
+		)`, now, bookID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -659,7 +747,7 @@ func (d *DB) JobStatus(ctx context.Context, bookID string) (Job, error) {
 	var j Job
 	err := d.QueryRowContext(ctx, `SELECT id,owner_user_id,book_id,kind,status,stage,progress,attempt,
 		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs WHERE book_id=?
-		ORDER BY created_at DESC LIMIT 1`, bookID).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
+		ORDER BY created_at DESC,rowid DESC LIMIT 1`, bookID).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
 		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
 	return j, err
 }

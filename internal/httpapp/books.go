@@ -556,6 +556,48 @@ func (s *Server) retryBook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (s *Server) retranscribeBook(w http.ResponseWriter, r *http.Request) {
+	u, _ := auth.UserFromContext(r.Context())
+	bookID := r.PathValue("id")
+	if _, err := s.db.BookForUser(r.Context(), u.ID, bookID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if s.pipeline == nil {
+		http.Error(w, "background transcription is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if strings.TrimSpace(s.cfg.GroqAPIKey) == "" {
+		http.Error(w, "fresh transcription is unavailable because Groq is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	jobID, err := randomID()
+	if err != nil {
+		http.Error(w, "could not queue fresh transcription", http.StatusInternalServerError)
+		return
+	}
+	if err := s.db.QueueRetranscription(r.Context(), u.ID, bookID, jobID); err != nil {
+		switch {
+		case errors.Is(err, db.ErrBookNotFound):
+			http.NotFound(w, r)
+		case errors.Is(err, db.ErrBookJobInProgress):
+			http.Error(w, "this book already has a job in progress", http.StatusConflict)
+		case errors.Is(err, db.ErrRetranscriptionNotReady):
+			http.Error(w, "the book must be ready with audio and a transcript before re-transcribing", http.StatusConflict)
+		default:
+			http.Error(w, "could not queue fresh transcription", http.StatusInternalServerError)
+		}
+		return
+	}
+	book, err := s.db.BookForUser(r.Context(), u.ID, bookID)
+	if err != nil {
+		http.Error(w, "fresh transcription was queued but book status could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	jsonOut(w, book)
+}
+
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	u, _ := auth.UserFromContext(r.Context())
 	bookID := r.PathValue("id")
@@ -584,7 +626,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		}
 		data, _ := json.Marshal(map[string]any{
 			"status": book.Status, "job_status": job.Status, "stage": job.Stage, "progress": job.Progress,
-			"error": job.Error, "not_before_at": job.NotBeforeAt,
+			"error": job.Error, "not_before_at": job.NotBeforeAt, "job_kind": job.Kind,
 		})
 		_, _ = fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
 		flusher.Flush()

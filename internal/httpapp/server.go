@@ -55,6 +55,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/books/{id}/events", s.events)
 	s.mux.HandleFunc("PUT /api/books/{id}/progress", s.updateProgress)
 	s.mux.HandleFunc("POST /api/books/{id}/retry", s.retryBook)
+	s.mux.HandleFunc("POST /api/books/{id}/retranscribe", s.retranscribeBook)
 	s.mux.HandleFunc("GET /api/admin/users", s.adminUsers)
 	s.mux.HandleFunc("PUT /api/admin/users/{id}", s.updateAdminUser)
 	sub, _ := fs.Sub(webui.Static, "static")

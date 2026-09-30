@@ -91,11 +91,15 @@ func (s *Service) CancelBook(bookID string) {
 }
 
 func (s *Service) process(ctx context.Context, job db.Job) {
-	stage := "acquiring"
 	book, err := s.db.BookByID(ctx, job.BookID)
 	if err != nil {
 		return
 	}
+	if job.Kind == "retranscribe" {
+		s.retranscribe(ctx, job, book)
+		return
+	}
+	stage := "acquiring"
 	bookDir := BookDirectory(s.cfg.DataDir, book.OwnerUserID, book.ID)
 	if err = os.MkdirAll(filepath.Join(bookDir, "source"), 0700); err != nil {
 		s.fail(ctx, job, stage, book, "Could not prepare storage for this book.")
@@ -291,6 +295,17 @@ func (s *Service) acquire(ctx context.Context, job db.Job, book db.Book, bookDir
 }
 
 func (s *Service) ensureChunks(ctx context.Context, bookID, bookDir string, durationMS int64) ([]db.Chunk, error) {
+	chunks, err := s.chunkPlan(bookID, bookID, filepath.Join(bookDir, "work"), durationMS)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.db.EnsureChunks(ctx, chunks); err != nil {
+		return nil, err
+	}
+	return s.db.Chunks(ctx, bookID)
+}
+
+func (s *Service) chunkPlan(idPrefix, bookID, outputDir string, durationMS int64) ([]db.Chunk, error) {
 	seconds := s.cfg.GroqChunkSeconds
 	if seconds < 60 {
 		seconds = 480
@@ -304,7 +319,7 @@ func (s *Service) ensureChunks(ctx context.Context, bookID, bookDir string, dura
 	var chunks []db.Chunk
 	for start, ordinal := int64(0), 0; start < durationMS; start, ordinal = start+stepMS, ordinal+1 {
 		end := min(start+chunkMS, durationMS)
-		base := filepath.Join(bookDir, "work", fmt.Sprintf("chunk-%05d", ordinal))
+		base := filepath.Join(outputDir, fmt.Sprintf("chunk-%05d", ordinal))
 		audioRel, err := filepath.Rel(s.cfg.DataDir, base+".flac")
 		if err != nil {
 			return nil, err
@@ -314,7 +329,7 @@ func (s *Service) ensureChunks(ctx context.Context, bookID, bookDir string, dura
 			return nil, err
 		}
 		chunks = append(chunks, db.Chunk{
-			ID: fmt.Sprintf("%s-%05d", bookID, ordinal), BookID: bookID, Ordinal: ordinal,
+			ID: fmt.Sprintf("%s-%05d", idPrefix, ordinal), BookID: bookID, Ordinal: ordinal,
 			StartMS: start, EndMS: end, Status: "queued", AudioRelPath: audioRel,
 			ResponseRelPath: responseRel,
 		})
@@ -322,10 +337,215 @@ func (s *Service) ensureChunks(ctx context.Context, bookID, bookDir string, dura
 			break
 		}
 	}
-	if err := s.db.EnsureChunks(ctx, chunks); err != nil {
+	return chunks, nil
+}
+
+func (s *Service) retranscriptionChunks(ctx context.Context, jobID, bookID, runDir string, durationMS int64) ([]db.Chunk, error) {
+	saved, err := s.db.Chunks(ctx, bookID)
+	if err != nil {
 		return nil, err
 	}
-	return s.db.Chunks(ctx, bookID)
+	if len(saved) == 0 {
+		return s.chunkPlan(jobID, bookID, runDir, durationMS)
+	}
+	chunks := make([]db.Chunk, 0, len(saved))
+	for _, previous := range saved {
+		if previous.EndMS <= previous.StartMS || previous.StartMS >= durationMS {
+			continue
+		}
+		base := filepath.Join(runDir, fmt.Sprintf("chunk-%05d", previous.Ordinal))
+		audioRel, err := filepath.Rel(s.cfg.DataDir, base+".flac")
+		if err != nil {
+			return nil, err
+		}
+		responseRel, err := filepath.Rel(s.cfg.DataDir, base+".json.gz")
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, db.Chunk{
+			ID: fmt.Sprintf("%s-%05d", jobID, previous.Ordinal), BookID: bookID, Ordinal: previous.Ordinal,
+			StartMS: previous.StartMS, EndMS: min(previous.EndMS, durationMS), Status: "queued",
+			AudioRelPath: audioRel, ResponseRelPath: responseRel,
+		})
+	}
+	return chunks, nil
+}
+
+func (s *Service) retranscribe(ctx context.Context, job db.Job, book db.Book) {
+	fail := func(stage, message string) {
+		if ctx.Err() == nil {
+			s.fail(ctx, job, stage, book, message)
+		}
+	}
+	if book.Status != "ready" || book.AudioRelPath == "" || book.TranscriptRelPath == "" || book.DurationMS <= 0 {
+		fail("retranscribing", "This book is not ready for a fresh transcription.")
+		return
+	}
+	if strings.TrimSpace(s.cfg.GroqAPIKey) == "" {
+		fail("retranscribing", "GROQ_API_KEY is not configured on the server.")
+		return
+	}
+	playbackPath, err := safeDataPath(s.cfg.DataDir, book.AudioRelPath)
+	if err != nil || fileMissingOrEmpty(playbackPath) {
+		fail("retranscribing", "The saved audio is unavailable; the current transcript was kept.")
+		return
+	}
+
+	var ebook *epub.Document
+	prompt := ""
+	if book.Mode == "aligned" {
+		var document epub.Document
+		if book.EbookJSONRelPath != "" {
+			ebookPath, pathErr := safeDataPath(s.cfg.DataDir, book.EbookJSONRelPath)
+			if pathErr == nil {
+				_ = readGzipJSON(ebookPath, &document)
+			}
+		}
+		if len(document.Chapters) == 0 && book.EpubRelPath != "" {
+			epubPath, pathErr := safeDataPath(s.cfg.DataDir, book.EpubRelPath)
+			if pathErr == nil {
+				document, err = epub.ParseFile(epubPath)
+			} else {
+				err = pathErr
+			}
+		}
+		if err != nil || len(document.Chapters) == 0 {
+			fail("retranscribing", "The paired EPUB could not be loaded; the current transcript was kept.")
+			return
+		}
+		ebook = &document
+		prompt = document.HintPrompt()
+	}
+
+	bookDir := BookDirectory(s.cfg.DataDir, book.OwnerUserID, book.ID)
+	runDir := filepath.Join(bookDir, "work", "retranscriptions", job.ID)
+	if err := os.MkdirAll(runDir, 0700); err != nil {
+		fail("retranscribing", "Could not prepare a safe workspace; the current transcript was kept.")
+		return
+	}
+	chunks, err := s.retranscriptionChunks(ctx, job.ID, book.ID, runDir, book.DurationMS)
+	if err != nil || len(chunks) == 0 {
+		fail("retranscribing", "Could not prepare the audio chunks; the current transcript was kept.")
+		return
+	}
+
+	responses := make(map[int]groq.Response, len(chunks))
+	for _, chunk := range chunks {
+		if ctx.Err() != nil {
+			return
+		}
+		responsePath, pathErr := safeDataPath(s.cfg.DataDir, chunk.ResponseRelPath)
+		if pathErr != nil || fileMissingOrEmpty(responsePath) {
+			continue
+		}
+		var response groq.Response
+		if readGzipJSON(responsePath, &response) == nil && len(response.Words) > 0 {
+			responses[chunk.Ordinal] = response
+		}
+	}
+	if err := s.db.SetJobProgress(ctx, job.ID, "retranscribing", "ready", progress(len(responses), len(chunks))); err != nil {
+		return
+	}
+	for _, chunk := range chunks {
+		if _, ok := responses[chunk.Ordinal]; ok {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		audioPath, pathErr := safeDataPath(s.cfg.DataDir, chunk.AudioRelPath)
+		if pathErr != nil {
+			fail("retranscribing", "Could not prepare a fresh audio chunk; the current transcript was kept.")
+			return
+		}
+		if fileMissingOrEmpty(audioPath) {
+			if err := os.MkdirAll(filepath.Dir(audioPath), 0700); err != nil {
+				fail("retranscribing", "Could not prepare a fresh audio chunk; the current transcript was kept.")
+				return
+			}
+			if err := s.tools.CreateChunk(ctx, playbackPath, audioPath, chunk.StartMS, chunk.EndMS); err != nil {
+				fail("retranscribing", "Could not prepare a fresh audio chunk; the current transcript was kept.")
+				return
+			}
+		}
+		if info, err := os.Stat(audioPath); err != nil || info.Size() > groqMaxChunkBytes {
+			fail("retranscribing", "A fresh audio chunk exceeds the transcription upload limit; the current transcript was kept.")
+			return
+		}
+		response, err := s.groq.TranscribeFile(ctx, audioPath, prompt)
+		if err != nil {
+			var limited *groq.RateLimitError
+			if errors.As(err, &limited) {
+				retryAt := time.Now().Add(limited.RetryAfter).UTC().Format(time.RFC3339)
+				_ = s.db.DeferJob(ctx, job.ID, "rate_limited", "ready", retryAt, progress(len(responses), len(chunks)))
+				return
+			}
+			fail("retranscribing", "Fresh transcription failed; the current transcript was kept. Retry when the provider is available.")
+			return
+		}
+		if len(response.Words) == 0 {
+			fail("retranscribing", "The fresh transcription returned no word timestamps; the current transcript was kept.")
+			return
+		}
+		responsePath, pathErr := safeDataPath(s.cfg.DataDir, chunk.ResponseRelPath)
+		if pathErr != nil || writeGzipJSONAtomic(responsePath, response) != nil {
+			fail("retranscribing", "Could not save the fresh transcription; the current transcript was kept.")
+			return
+		}
+		_ = os.Remove(audioPath)
+		responses[chunk.Ordinal] = response
+		if err := s.db.SetJobProgress(ctx, job.ID, "retranscribing", "ready", progress(len(responses), len(chunks))); err != nil {
+			return
+		}
+	}
+	if len(responses) != len(chunks) {
+		fail("retranscribing", "Fresh transcription did not finish; the current transcript was kept.")
+		return
+	}
+
+	transcriptDoc := mergeTranscriptionResponses(chunks, responses, book.DurationMS)
+	transcriptPath := filepath.Join(runDir, "transcript.v1.json.gz")
+	if err := writeGzipJSONAtomic(transcriptPath, transcriptDoc); err != nil {
+		fail("retranscribing", "Could not build the fresh transcript; the current transcript was kept.")
+		return
+	}
+	transcriptRel, err := filepath.Rel(s.cfg.DataDir, transcriptPath)
+	if err != nil {
+		fail("retranscribing", "Could not publish the fresh transcript; the current transcript was kept.")
+		return
+	}
+
+	alignmentRel := ""
+	var quality *float64
+	if ebook != nil {
+		if err := s.db.SetJobProgress(ctx, job.ID, "aligning_retranscription", "ready", 0.97); err != nil {
+			return
+		}
+		alignment := align.AlignEbook(*ebook, transcriptDoc)
+		alignmentPath := filepath.Join(runDir, "alignment.v1.json.gz")
+		if err := writeGzipJSONAtomic(alignmentPath, alignment); err != nil {
+			fail("aligning_retranscription", "Could not align the fresh transcript; the current transcript was kept.")
+			return
+		}
+		alignmentRel, err = filepath.Rel(s.cfg.DataDir, alignmentPath)
+		if err != nil {
+			fail("aligning_retranscription", "Could not publish the fresh alignment; the current transcript was kept.")
+			return
+		}
+		quality = &alignment.Quality
+	}
+	if err := s.db.SetTranscriptionArtifacts(ctx, book.ID, transcriptRel, alignmentRel, quality); err != nil {
+		fail("retranscribing", "Could not publish the fresh transcript; the current transcript was kept.")
+		return
+	}
+	if err := s.db.CompleteJob(ctx, job.ID); err != nil {
+		return
+	}
+	for _, chunk := range chunks {
+		if audioPath, pathErr := safeDataPath(s.cfg.DataDir, chunk.AudioRelPath); pathErr == nil {
+			_ = os.Remove(audioPath)
+		}
+	}
 }
 
 func (s *Service) transcribe(ctx context.Context, job db.Job, book db.Book, bookDir, playbackPath string,
@@ -530,6 +750,19 @@ func (s *Service) writeTranscript(ctx context.Context, bookID, bookDir string, c
 	if len(responses) == 0 {
 		return nil
 	}
+	doc := mergeTranscriptionResponses(chunks, responses, durationMS)
+	path := filepath.Join(bookDir, "transcript.v1.json.gz")
+	if err := writeGzipJSONAtomic(path, doc); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(s.cfg.DataDir, path)
+	if err != nil {
+		return err
+	}
+	return s.db.SetTranscriptPath(ctx, bookID, rel)
+}
+
+func mergeTranscriptionResponses(chunks []db.Chunk, responses map[int]groq.Response, durationMS int64) transcript.Document {
 	timed := make([]transcript.TimedChunk, 0, len(responses))
 	for _, c := range chunks {
 		resp, ok := responses[c.Ordinal]
@@ -550,16 +783,7 @@ func (s *Service) writeTranscript(ctx context.Context, bookID, bookDir string, c
 		timed = append(timed, chunk)
 	}
 	sort.Slice(timed, func(i, j int) bool { return timed[i].StartMS < timed[j].StartMS })
-	doc := transcript.MergeChunks(timed, durationMS)
-	path := filepath.Join(bookDir, "transcript.v1.json.gz")
-	if err := writeGzipJSONAtomic(path, doc); err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(s.cfg.DataDir, path)
-	if err != nil {
-		return err
-	}
-	return s.db.SetTranscriptPath(ctx, bookID, rel)
+	return transcript.MergeChunks(timed, durationMS)
 }
 
 func (s *Service) fail(ctx context.Context, job db.Job, stage string, book db.Book, message string) {

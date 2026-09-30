@@ -4,6 +4,7 @@ let shelfSequence = 0;
 let shelfSearchTimer = 0;
 let pairResults = [];
 let selectedPair = null;
+let retranscriptionTarget = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -30,6 +31,16 @@ function formatDuration(ms) {
 }
 
 function progressLabel(book) {
+  if (book.stage === 'retranscribing' && book.job_status === 'error') {
+    return 'Fresh transcript failed · current version kept';
+  }
+  if (book.stage === 'retranscribing' && book.job_status === 'running') {
+    return 'Fresh transcript in progress · current version ready';
+  }
+  if (book.stage === 'retranscribing' && book.job_status === 'queued') {
+    return 'Fresh transcript queued · current version ready';
+  }
+  if (book.stage === 'aligning_retranscription') return 'Fresh transcript ready · aligning EPUB…';
   if (book.error) return book.error;
   if (book.stage === 'aligning') return book.status === 'ready' ? 'Ready · aligning ebook' : 'Aligning ebook text…';
   if (book.status === 'ready') {
@@ -84,6 +95,16 @@ async function loadBooks() {
       const title = book.title || 'Untitled';
       const percentage = Math.max(0, Math.min(100, Math.round((book.progress || 0) * 100)));
       const subtitle = [book.author, formatDuration(book.duration_ms)].filter(Boolean).join(' · ');
+      const jobActive = book.job_status === 'queued' || book.job_status === 'running';
+      const retranscribeLabel = book.stage === 'rate_limited'
+        ? 'Waiting for Groq…'
+        : book.stage === 'aligning_retranscription'
+          ? 'Aligning fresh transcript…'
+        : book.stage === 'retranscribing' && book.job_status === 'queued'
+          ? 'Fresh transcript queued…'
+          : book.stage === 'retranscribing' && book.job_status === 'running'
+            ? 'Re-transcribing…'
+            : jobActive ? 'Transcription in progress…' : 'Re-transcribe';
       return `<article class="book-card">
         <a class="book-link" href="/reader/${encodeURIComponent(book.id)}" aria-label="Open ${escapeHTML(title)}">
           <div class="book-cover cover-${coverColor(title)}">
@@ -98,6 +119,12 @@ async function loadBooks() {
             <div class="progress-track"><span style="width:${percentage}%"></span></div>
           </div>
         </a>
+        ${book.status === 'ready' ? `<div class="book-card-actions">
+          <button class="retranscribe-book" type="button" data-retranscribe-id="${escapeHTML(book.id)}"
+            data-retranscribe-title="${escapeHTML(title)}" ${jobActive ? 'disabled' : ''}>
+            ${escapeHTML(retranscribeLabel)}
+          </button>
+        </div>` : ''}
         <button class="delete-book" type="button" data-delete-id="${escapeHTML(book.id)}" aria-label="Remove ${escapeHTML(title)}" title="Remove book">×</button>
       </article>`;
     }).join('');
@@ -288,6 +315,22 @@ $('#pairImportSubmit').addEventListener('click', async (event) => {
 });
 
 $('#books').addEventListener('click', async (event) => {
+  const retranscribeButton = event.target.closest('[data-retranscribe-id]');
+  if (retranscribeButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (retranscribeButton.disabled) return;
+    retranscriptionTarget = {
+      id: retranscribeButton.dataset.retranscribeId,
+      title: retranscribeButton.dataset.retranscribeTitle || 'this book',
+    };
+    $('#retranscribeTitle').textContent = retranscriptionTarget.title;
+    $('#retranscribeError').textContent = '';
+    $('#confirmRetranscribe').disabled = false;
+    $('#confirmRetranscribe').textContent = 'Re-transcribe';
+    $('#retranscribeDialog').showModal();
+    return;
+  }
   const button = event.target.closest('[data-delete-id]');
   if (!button) return;
   event.preventDefault();
@@ -300,6 +343,32 @@ $('#books').addEventListener('click', async (event) => {
   } catch (error) {
     alert(error.message || 'Could not remove this book.');
     button.disabled = false;
+  }
+});
+
+function closeRetranscribeDialog() {
+  retranscriptionTarget = null;
+  $('#retranscribeDialog').close();
+}
+
+$('#retranscribeDialog').addEventListener('close', () => { retranscriptionTarget = null; });
+$('#closeRetranscribe').addEventListener('click', closeRetranscribeDialog);
+$('#cancelRetranscribe').addEventListener('click', closeRetranscribeDialog);
+$('#confirmRetranscribe').addEventListener('click', async (event) => {
+  if (!retranscriptionTarget) return;
+  const button = event.currentTarget;
+  const error = $('#retranscribeError');
+  button.disabled = true;
+  button.textContent = 'Queuing…';
+  error.textContent = '';
+  try {
+    await api(`/api/books/${encodeURIComponent(retranscriptionTarget.id)}/retranscribe`, { method: 'POST' });
+    closeRetranscribeDialog();
+    await loadBooks();
+  } catch (failure) {
+    error.textContent = failure.message || 'Could not queue a fresh transcript.';
+    button.disabled = false;
+    button.textContent = 'Re-transcribe';
   }
 });
 
