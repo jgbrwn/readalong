@@ -45,6 +45,15 @@ bookshelf or uploaded audiobook is shown.
   <img src="docs/assets/readalong-reader-dark-mobile.png" alt="Readalong reader in dark mode on mobile" width="31%">
 </p>
 
+## Demo
+
+<p align="center">
+  <video controls preload="metadata" width="720">
+    <source src="https://raw.githubusercontent.com/jgbrwn/readalong/main/readalong-demo.mp4" type="video/mp4">
+    <a href="readalong-demo.mp4">Play or download the Readalong demo</a>
+  </video>
+</p>
+
 **Alignment caveat:** Readalong can now extract EPUB text and align it against
 the audiobook transcript. A source link or exact title/author candidate is not
 proof of an identical edition. When text match confidence is low, the reader
