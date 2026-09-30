@@ -111,3 +111,79 @@ func TestMergeRepairsOrderAcrossOverlappingChunks(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeMasksDenseASRArtifactBurstWithoutChangingRawInputs(t *testing.T) {
+	raw := []TimedWord{
+		{Text: "in", StartMS: 900, EndMS: 1000, Confidence: 1},
+		{Text: "13340108", StartMS: 1000, EndMS: 1020, Confidence: 1},
+		{Text: "e2", StartMS: 1020, EndMS: 1040, Confidence: 1},
+		{Text: "mcaur6", StartMS: 1040, EndMS: 1060, Confidence: 1},
+		{Text: "102401013", StartMS: 1060, EndMS: 1080, Confidence: 1},
+		{Text: "xe7ft", StartMS: 1080, EndMS: 1100, Confidence: 1},
+		{Text: "yeltsjf", StartMS: 1100, EndMS: 1120, Confidence: 1},
+		{Text: "192", StartMS: 1120, EndMS: 1140, Confidence: 1},
+		{Text: "c'hovelss", StartMS: 1130, EndMS: 1250, Confidence: 0},
+		{Text: "40", StartMS: 1300, EndMS: 1350, Confidence: 1},
+		{Text: "41", StartMS: 1350, EndMS: 1400, Confidence: 1},
+		{Text: "The", StartMS: 1400, EndMS: 1500, Confidence: 1},
+		{Text: "dwellings.", StartMS: 1500, EndMS: 1800, Confidence: 1},
+	}
+	doc := MergeChunks([]TimedChunk{{Words: raw}}, 3000)
+	var got []Word
+	for _, sentence := range doc.Sentences {
+		got = append(got, sentence.Words...)
+	}
+	if len(got) != 4 || got[0].Text != "in" || got[1].Text != "[unclear audio]" ||
+		got[2].Text != "The" || got[3].Text != "dwellings." {
+		t.Fatalf("artifact burst was not safely collapsed: %#v", got)
+	}
+	if got[1].Confidence != 0 || got[1].StartMS != 1000 || got[1].EndMS != got[2].StartMS {
+		t.Fatalf("unclear-audio marker has unexpected timing/confidence: %#v", got[1])
+	}
+	if raw[1].Text != "13340108" || raw[8].Text != "c'hovelss" {
+		t.Fatalf("source words were modified: %#v", raw)
+	}
+}
+
+func TestMergeKeepsIsolatedNumbersAndNamesButDoesNotTimeImpossibleWords(t *testing.T) {
+	doc := MergeChunks([]TimedChunk{{Words: []TimedWord{
+		{Text: "In", StartMS: 0, EndMS: 100, Confidence: 1},
+		{Text: "1999", StartMS: 120, EndMS: 250, Confidence: 1},
+		{Text: "R2D2", StartMS: 260, EndMS: 400, Confidence: 1},
+		{Text: "a", StartMS: 410, EndMS: 430, Confidence: 1},
+		{Text: "normal", StartMS: 440, EndMS: 700, Confidence: 1},
+	}}}, 1000)
+	var got []Word
+	for _, sentence := range doc.Sentences {
+		got = append(got, sentence.Words...)
+	}
+	if len(got) != 5 || got[1].Text != "1999" || got[2].Text != "R2D2" {
+		t.Fatalf("isolated numbers/name were incorrectly removed: %#v", got)
+	}
+	if got[3].Confidence != 0 {
+		t.Fatalf("implausibly short word timestamp stayed highlighted: %#v", got[3])
+	}
+}
+
+func TestMergeKeepsPlausiblyTimedCodes(t *testing.T) {
+	doc := MergeChunks([]TimedChunk{{Words: []TimedWord{
+		{Text: "The", StartMS: 0, EndMS: 180, Confidence: 1},
+		{Text: "A123BC", StartMS: 200, EndMS: 500, Confidence: 1},
+		{Text: "12345678", StartMS: 520, EndMS: 900, Confidence: 1},
+		{Text: "ZX90QW", StartMS: 920, EndMS: 1200, Confidence: 1},
+		{Text: "7654321", StartMS: 1220, EndMS: 1520, Confidence: 1},
+		{Text: "followed", StartMS: 1540, EndMS: 1900, Confidence: 1},
+	}}}, 3000)
+	var got []Word
+	for _, sentence := range doc.Sentences {
+		got = append(got, sentence.Words...)
+	}
+	if len(got) != 6 {
+		t.Fatalf("plausible code sequence was collapsed: %#v", got)
+	}
+	for _, word := range got {
+		if word.Text == "[unclear audio]" {
+			t.Fatalf("plausibly timed code sequence was marked unclear: %#v", got)
+		}
+	}
+}

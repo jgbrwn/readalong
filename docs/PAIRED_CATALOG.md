@@ -52,6 +52,10 @@ import form.
   trailing-phrase search for multiword queries and only keeps results whose
   title still contains every meaningful search term. This tolerates omitted
   connectors such as “of” without returning unrelated matches.
+- The optional trailing-phrase query has a 45-second ceiling so a slow first
+  attempt can still receive its single bounded retry. It remains one query
+  phrase with at most two attempts; a provider-requested delay over 15 seconds
+  is reported rather than retried early.
 - LibriVox's September 16, 2026 API notice set a 500-record maximum target
   for on/after September 26, 2026 and asks clients to leave several seconds
   between calls. The rollout status is not assumed; Readalong requests only
@@ -99,6 +103,14 @@ returned no title match, while the catalog title is **Anne of Green Gables**.
 Readalong now retries one distinctive trailing phrase after an empty
 multiword search and filters the results to titles containing all meaningful
 query words. This is a search-quality fallback, not a new provider.
+
+On September 30, 2026, a fresh request from the VM to that same canonical
+LibriVox host timed out even when fetching a known record by ID; trying the
+`www` alias returned a TLS certificate error. The app's documented endpoint,
+query parameters, and server-side request format remain correct, so do not
+switch to the broken alias or interpret a 522 as a title no-match. The API's
+own rate guidance is still followed; a long `Retry-After` is surfaced instead
+of being ignored.
 
 Other sources evaluated:
 

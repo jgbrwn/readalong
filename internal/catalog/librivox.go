@@ -20,7 +20,7 @@ const (
 	defaultLibriVoxAPI = "https://librivox.org/api/feed/audiobooks/"
 	requestGap         = 3 * time.Second
 	maxRetryAfterWait  = 15 * time.Second
-	fallbackSearchTime = 15 * time.Second
+	fallbackSearchTime = 45 * time.Second
 	cacheDuration      = 15 * time.Minute
 	maxResponseBytes   = 4 << 20
 )
@@ -325,11 +325,15 @@ func (c *Client) fetch(ctx context.Context, key string, values url.Values) ([]Re
 		if attempt == 0 && (transientCatalogStatus(status) || status == http.StatusTooManyRequests) {
 			delay, hasRetryAfter := parseCatalogRetryAfter(retryAfter)
 			if status == http.StatusTooManyRequests && (!hasRetryAfter || delay > maxRetryAfterWait) {
+				if hasRetryAfter {
+					return nil, fmt.Errorf("LibriVox catalog is rate limited; retry after %s", delay.Round(time.Second))
+				}
 				return nil, fmt.Errorf("LibriVox catalog is busy; wait a few seconds and try again")
 			}
 			if hasRetryAfter {
 				if delay > maxRetryAfterWait {
-					return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable (HTTP %d)", status)
+					return nil, fmt.Errorf("LibriVox catalog is temporarily unavailable (HTTP %d); retry after %s",
+						status, delay.Round(time.Second))
 				}
 				if delay < c.minRequestGap {
 					delay = c.minRequestGap
@@ -413,7 +417,7 @@ func parseCatalogRetryAfter(value string) (time.Duration, bool) {
 		if seconds < 0 {
 			return 0, false
 		}
-		if seconds > int64(maxRetryAfterWait/time.Second) {
+		if seconds > int64((1<<63-1)/int64(time.Second)) {
 			return maxRetryAfterWait + time.Second, true
 		}
 		return time.Duration(seconds) * time.Second, true

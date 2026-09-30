@@ -25,6 +25,8 @@
   failures retry once without violating the request gap.
 - “Anne Green Gables” finds “Anne of Green Gables” without broadening to titles
   that omit one of the supplied significant words.
+- A slow first attempt on the trailing-phrase query does not cancel its one
+  permitted retry prematurely.
 - Public media URL redirecting to a private IP is rejected.
 - Bad/404 URL.
 - URL resolving to localhost/private IP is rejected for direct HTTP fetch.
@@ -37,6 +39,8 @@
 - 2-second overlap merges without duplicate words.
 - Timestamp regressions never reorder transcript tokens; severe regressions
   remain readable but are not highlighted.
+- Dense bursts of impossible ASR tokens/timestamps collapse to an untimed
+  `[unclear audio]` marker, while isolated numbers and alphanumeric names stay.
 - Repeated words spoken close together are not discarded as chunk duplicates.
 - Kill process halfway through; completed chunks are reused after restart.
 - Simulated 429 stores retry time and resumes later.

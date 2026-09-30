@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -258,6 +259,8 @@ func TestSearchDoesNotRetryCatalogLongRetryAfter(t *testing.T) {
 	client.BaseURL, client.HTTP, client.minRequestGap = server.URL, server.Client(), 0
 	if _, err := client.Search(context.Background(), "Gift of the Magi"); err == nil {
 		t.Fatal("expected unavailable error")
+	} else if !strings.Contains(err.Error(), "retry after 30s") {
+		t.Fatalf("long Retry-After was not explained: %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("long Retry-After made %d requests, want 1", calls)

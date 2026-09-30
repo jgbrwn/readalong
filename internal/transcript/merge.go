@@ -10,6 +10,9 @@ const (
 	smallTimestampJitterMS = int64(150)
 	overlapToleranceMS     = int64(750)
 	singleWordOverlapMS    = int64(120)
+	minHighlightDurationMS = int64(40)
+	asrArtifactWindowMS    = int64(30_000)
+	asrArtifactTailMS      = int64(3_000)
 )
 
 type TimedWord struct {
@@ -73,10 +76,132 @@ func MergeChunks(chunks []TimedChunk, durationMS int64) Document {
 					word.EndMS = durationMS
 				}
 			}
+			if word.EndMS-word.StartMS < minHighlightDurationMS {
+				word.Confidence = 0
+			}
 			merged = append(merged, word)
 		}
 	}
+	merged = suppressASRArtifactRuns(merged)
 	return Document{Version: 1, DurationMS: durationMS, Sentences: sentences(merged)}
+}
+
+type artifactKind uint8
+
+const (
+	artifactNone artifactKind = iota
+	artifactLongNumber
+	artifactMixedAlphanumeric
+	artifactConsonantHeavy
+)
+
+func classifyArtifactToken(text string) artifactKind {
+	letters, digits, vowels := 0, 0, 0
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case unicode.IsLetter(r):
+			letters++
+			if strings.ContainsRune("aeiou", r) {
+				vowels++
+			}
+		case unicode.IsDigit(r):
+			digits++
+		}
+	}
+	if digits >= 7 && letters == 0 {
+		return artifactLongNumber
+	}
+	if letters >= 4 && digits > 0 && letters+digits >= 5 {
+		return artifactMixedAlphanumeric
+	}
+	if letters >= 6 && digits == 0 && vowels <= 1 {
+		return artifactConsonantHeavy
+	}
+	return artifactNone
+}
+
+// suppressASRArtifactRuns replaces dense bursts of impossible ASR output with
+// one untimed marker. Raw Groq chunk responses remain untouched and can be
+// reprocessed if a better transcription becomes available.
+func suppressASRArtifactRuns(words []TimedWord) []TimedWord {
+	if len(words) == 0 {
+		return words
+	}
+	out := make([]TimedWord, 0, len(words))
+	for i := 0; i < len(words); {
+		if classifyArtifactToken(words[i].Text) != artifactLongNumber {
+			out = append(out, words[i])
+			i++
+			continue
+		}
+
+		lastMarker := i
+		markers, nonNumericMarkers, impossibleDurations := 0, 0, 0
+		for j := i; j < len(words) && words[j].StartMS-words[i].StartMS <= asrArtifactWindowMS; j++ {
+			if words[j].EndMS-words[j].StartMS < minHighlightDurationMS {
+				impossibleDurations++
+			}
+			kind := classifyArtifactToken(words[j].Text)
+			if kind == artifactNone {
+				continue
+			}
+			markers++
+			lastMarker = j
+			if kind != artifactLongNumber {
+				nonNumericMarkers++
+			}
+		}
+		if markers < 4 || nonNumericMarkers < 2 || impossibleDurations < 3 {
+			out = append(out, words[i])
+			i++
+			continue
+		}
+
+		end := lastMarker
+		for j := end + 1; j < len(words); j++ {
+			if words[j].StartMS-words[end].EndMS > asrArtifactTailMS {
+				break
+			}
+			if isArtifactContinuation(words[j]) {
+				end = j
+				continue
+			}
+			break
+		}
+
+		startMS, endMS := words[i].StartMS, words[end].EndMS
+		if end+1 < len(words) && endMS > words[end+1].StartMS {
+			endMS = words[end+1].StartMS
+		}
+		if endMS <= startMS {
+			out = append(out, words[i])
+			i++
+			continue
+		}
+		out = append(out, TimedWord{
+			Text:       "[unclear audio]",
+			StartMS:    startMS,
+			EndMS:      endMS,
+			Confidence: 0,
+		})
+		i = end + 1
+	}
+	return out
+}
+
+func isArtifactContinuation(word TimedWord) bool {
+	if classifyArtifactToken(word.Text) != artifactNone || word.Confidence == 0 {
+		return true
+	}
+	letters, digits := 0, 0
+	for _, r := range word.Text {
+		if unicode.IsLetter(r) {
+			letters++
+		} else if unicode.IsDigit(r) {
+			digits++
+		}
+	}
+	return letters > 0 && digits > 0 || digits >= 2
 }
 
 func overlapPrefix(previous, next []TimedWord) int {

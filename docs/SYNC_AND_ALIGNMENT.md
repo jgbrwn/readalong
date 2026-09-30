@@ -45,6 +45,13 @@ out of order in the transcript. Keep tokens in chunk order, clamp minor time
 regressions to a searchable monotonic timeline, and leave severely regressed
 words untimed instead of highlighting them with false precision.
 
+Treat timestamps shorter than 40 ms as untrustworthy for word highlighting.
+When a compact burst contains several implausible alphanumeric/long-number ASR
+tokens and multiple such impossible timings, replace that derived-text span
+with one untimed `[unclear audio]` marker. Preserve the original chunk response
+so a later re-transcription can recover it; do not silently turn a single
+unusual name or isolated number into a placeholder.
+
 ### Transcript shaping
 
 Use Groq punctuation/segments to group words into sentences and paragraphs. The visible word token keeps punctuation, but matching uses a normalized token.
