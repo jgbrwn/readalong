@@ -120,19 +120,27 @@ background job.
 
 ### GET /api/discovery/pairs
 
-Searches a throttled, cached LibriVox API query. Results are returned only when
-the record links to a Project Gutenberg text source and an Archive.org audio
-archive. The API exposes canonical Gutenberg page URLs and LibriVox detail
-URLs, never the archive download URL.
+Searches the Internet Archive's LibriVox collection first, then uses the
+documented LibriVox API as a bounded fallback. Results identify the audio
+provider and match basis. A Gutenberg ID found in IA `source`/`description`
+metadata is checked against the Project Gutenberg catalog; otherwise exact
+title/creator/language `Type=Text` candidates are returned for explicit user
+review.
+Archive download URLs are never returned. Results expose `provider`,
+`match_kind` (`source_linked` or `title_author`), and the validated
+`text_candidates` list so the UI can distinguish evidence from suggestions.
 
 ### POST /api/discovery/pairs/:id/import
 
-JSON body: `{"rights_confirmed":true}`. The server re-fetches the LibriVox
-record by numeric ID, downloads its chapter ZIP from Archive.org, downloads
-the matching Gutenberg EPUB from the fixed Project Gutenberg mirror path,
-then imports both into the caller's private shelf. No user-provided network
-URL is accepted by this endpoint. The UI warns that linked records may still
-refer to different editions/translations and asks the user to confirm rights.
+JSON body:
+`{"rights_confirmed":true,"gutenberg_id":"45","match_confirmed":true}`.
+`gutenberg_id` is required for IA results and must be a current source-linked
+or title/creator/language candidate. `match_confirmed` is required for
+inferred/ambiguous matches. The server re-fetches the LibriVox/IA item,
+revalidates its approved source and audio files, downloads the Archive.org MP3
+archive and selected Gutenberg EPUB, then imports both into the caller's
+private shelf. No user-provided network URL is accepted. The UI asks the user
+to confirm rights and distinguish a source link from a suggested match.
 
 ### GET /api/books/:id/reader
 

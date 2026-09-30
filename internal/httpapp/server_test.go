@@ -80,6 +80,91 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	}
 }
 
+func TestInternetArchivePairRequiresChoosingAndConfirmingTextCandidate(t *testing.T) {
+	var pgCatalog bytes.Buffer
+	compressor := gzip.NewWriter(&pgCatalog)
+	_, _ = compressor.Write([]byte("Text#,Type,Issued,Title,Language,Authors,Subjects,LoCC,Bookshelves\n" +
+		"45,Text,2008-06-27,Anne of Green Gables,en,\"Montgomery, L. M. (Lucy Maud), 1874-1942\",Fiction,PZ,Classics\n" +
+		"19576,Text,2006-10-20,Anne of Green Gables,en,\"Montgomery, L. M. (Lucy Maud), 1874-1942\",Fiction,PZ,Classics\n"))
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/advancedsearch.php":
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"docs": []any{map[string]any{
+				"identifier": "anne_of_green_gables_librivox", "title": "Anne of Green Gables",
+				"creator": "Lucy Maud Montgomery", "language": "eng", "runtime": "10:30.11",
+				"source":      "Librivox recording of a public-domain text",
+				"description": `LibriVox recording. Read by <a href="https://example.org/reader">Karen Savage</a>.`,
+				"licenseurl":  "http://creativecommons.org/licenses/publicdomain/",
+			}}}})
+		case "/pg_catalog.csv.gz":
+			_, _ = w.Write(pgCatalog.Bytes())
+		case "/metadata/anne_of_green_gables_librivox":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"identifier": "anne_of_green_gables_librivox", "title": "Anne of Green Gables",
+					"creator": "Lucy Maud Montgomery", "language": "eng", "runtime": "10:30.11",
+					"mediatype": "audio", "collection": []string{"librivoxaudio"},
+					"source":      "Librivox recording of a public-domain text",
+					"description": `LibriVox recording. Read by <a href="https://example.org/reader">Karen Savage</a>.`,
+				},
+				"files": []any{map[string]any{"name": "anne_01_64kb.mp3", "private": false}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := catalog.NewClient()
+	client.ArchiveEnabled = true
+	client.ArchiveBaseURL = server.URL
+	client.ArchiveRequestGap = 0
+	client.GutenbergCatalogURL = server.URL + "/pg_catalog.csv.gz"
+	client.HTTP = server.Client()
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound}
+	d, _ := testServer(t, cfg)
+	handler := NewWithCatalog(cfg, d, client)
+
+	search := request(handler, http.MethodGet, "/api/discovery/pairs?q=Anne+Green+Gables",
+		"catalog-user", "reader@example.org", "")
+	if search.Code != http.StatusOK || !strings.Contains(search.Body.String(), `"provider":"internet_archive"`) ||
+		!strings.Contains(search.Body.String(), `"match_kind":"title_author"`) ||
+		!strings.Contains(search.Body.String(), `"gutenberg_id":"19576"`) {
+		t.Fatalf("Internet Archive search = %d: %s", search.Code, search.Body)
+	}
+	if strings.Contains(search.Body.String(), `"url_zip_file"`) || strings.Contains(search.Body.String(), `"source_url"`) {
+		t.Fatalf("search exposed an import URL: %s", search.Body)
+	}
+
+	path := "/api/discovery/pairs/ia-anne_of_green_gables_librivox/import"
+	unselected := request(handler, http.MethodPost, path, "catalog-user", "reader@example.org",
+		`{"rights_confirmed":true,"match_confirmed":true}`)
+	if unselected.Code != http.StatusBadRequest {
+		t.Fatalf("missing text selection status = %d: %s", unselected.Code, unselected.Body)
+	}
+	unconfirmed := request(handler, http.MethodPost, path, "catalog-user", "reader@example.org",
+		`{"rights_confirmed":true,"gutenberg_id":"45"}`)
+	if unconfirmed.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed title-author match status = %d: %s", unconfirmed.Code, unconfirmed.Body)
+	}
+	imported := request(handler, http.MethodPost, path, "catalog-user", "reader@example.org",
+		`{"rights_confirmed":true,"gutenberg_id":"45","match_confirmed":true}`)
+	if imported.Code != http.StatusAccepted {
+		t.Fatalf("selected text import = %d: %s", imported.Code, imported.Body)
+	}
+	var book db.Book
+	if err := json.Unmarshal(imported.Body.Bytes(), &book); err != nil {
+		t.Fatal(err)
+	}
+	if book.Mode != "aligned" || book.SourceKind != "librivox" || book.GutenbergID != "45" ||
+		book.Title != "Anne of Green Gables" || book.EbookSourceURL != "https://www.gutenberg.org/ebooks/45" {
+		t.Fatalf("unexpected imported IA pair: %#v", book)
+	}
+}
+
 func TestRetranscribeEndpointQueuesFreshJobWithoutReplacingCurrentTranscript(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := config.Config{

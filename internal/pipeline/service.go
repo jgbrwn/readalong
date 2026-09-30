@@ -107,6 +107,23 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 	}
 	_ = os.MkdirAll(filepath.Join(bookDir, "work"), 0700)
 
+	var ebook *epub.Document
+	if book.Mode == "aligned" && book.SourceKind == "librivox" {
+		stage = "validating_ebook"
+		if err := s.db.SetJobProgress(ctx, job.ID, stage, "acquiring", 0.03); err != nil {
+			return
+		}
+		ebook, err = s.prepareEbook(ctx, book, bookDir)
+		if err != nil {
+			s.fail(ctx, job, stage, book, "The selected Gutenberg EPUB was unavailable or invalid; no audio was downloaded. Choose another text edition.")
+			return
+		}
+		stage = "acquiring"
+		if err := s.db.SetJobProgress(ctx, job.ID, stage, "acquiring", 0.05); err != nil {
+			return
+		}
+	}
+
 	sourcePath, metadata, err := s.acquire(ctx, job, book, bookDir)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -193,16 +210,17 @@ func (s *Service) process(ctx context.Context, job db.Job) {
 	}
 	book.DurationMS, book.Title, book.Author = durationMS, title, author
 
-	var ebook *epub.Document
 	if book.Mode == "aligned" {
 		stage = "aligning"
 		if err := s.db.SetJobProgress(ctx, job.ID, stage, "transcribing", 0.14); err != nil {
 			return
 		}
-		ebook, err = s.prepareEbook(ctx, book, bookDir)
-		if err != nil {
-			s.fail(ctx, job, stage, book, "Could not load the paired EPUB. Retry, or add a valid Gutenberg EPUB.")
-			return
+		if ebook == nil {
+			ebook, err = s.prepareEbook(ctx, book, bookDir)
+			if err != nil {
+				s.fail(ctx, job, stage, book, "Could not load the paired EPUB. Retry, or add a valid Gutenberg EPUB.")
+				return
+			}
 		}
 		if ebook.Title != "" && book.Title == "Untitled" {
 			title = ebook.Title

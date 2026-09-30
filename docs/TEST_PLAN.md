@@ -7,8 +7,25 @@
 - Direct MP3 URL.
 - YouTube normal video/audiobook URL without cookies or yt-dlp config.
 - YouTube fallback client path.
-- LibriVox catalog search returns only records linked to Gutenberg and
-  Archive.org sources.
+- Internet Archive search is restricted to `librivoxaudio` audio items and
+  excludes non-LibriVox/paid sources.
+- IA Gutenberg IDs from source/description metadata are validated against the
+  official Project Gutenberg catalog, require `Type=Text`, and match
+  title/creator/language.
+- Gutenberg links in IA descriptions that refer only to individual stories
+  inside a differently titled anthology are rejected.
+- IA items without an ebook ID show every exact title/creator/language
+  candidate, require an explicit selection when ambiguous, and require match
+  confirmation before import.
+- IA import re-fetches metadata, verifies collection/media type/public MP3,
+  and constructs the Archive.org download URL from the validated item ID.
+- A broken selected Gutenberg EPUB fails before the IA audiobook ZIP is
+  downloaded.
+- IA match metadata cannot expose a ZIP/download URL to the client.
+- LibriVox catalog remains a bounded fallback when IA is unavailable or has
+  no usable candidate.
+- Gutenberg catalog cache survives restarts and uses stale data if its host is
+  temporarily unavailable.
 - LibriVox catalog retries network/HTTP 408/transient 5xx failures once, but
   retries HTTP 429 only with a short explicit `Retry-After`; long waits do not
   trigger automatic retries.

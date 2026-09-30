@@ -43,6 +43,7 @@ function progressLabel(book) {
   if (book.stage === 'aligning_retranscription') return 'Fresh transcript ready · aligning EPUB…';
   if (book.error) return book.error;
   if (book.stage === 'aligning') return book.status === 'ready' ? 'Ready · aligning ebook' : 'Aligning ebook text…';
+  if (book.stage === 'validating_ebook') return 'Checking selected Gutenberg text…';
   if (book.status === 'ready') {
     return book.stage === 'transcribing' ? 'Ready to read · finishing transcript' : 'Ready to read';
   }
@@ -233,32 +234,41 @@ $('#pairSearchForm').addEventListener('submit', async (event) => {
   const submit = $('#pairSearchSubmit');
   if (query.length < 2) {
     message.textContent = 'Enter at least two characters.';
+    message.dataset.state = 'error';
     return;
   }
   submit.disabled = true;
   submit.textContent = 'Searching…';
-  message.textContent = 'Searching source-linked LibriVox and Gutenberg records…';
+  message.textContent = 'Searching free LibriVox audio and matching Gutenberg texts…';
+  message.dataset.state = 'loading';
   $('#pairResults').replaceChildren();
   try {
     const params = new URLSearchParams({ q: query });
     pairResults = (await api(`/api/discovery/pairs?${params}`)) || [];
     message.textContent = pairResults.length
-      ? `${pairResults.length} source-linked ${pairResults.length === 1 ? 'pair' : 'pairs'} found.`
-      : 'No source-linked pairs found. Try a different title.';
+      ? `${pairResults.length} free LibriVox ${pairResults.length === 1 ? 'match' : 'matches'} found. Review the text link before importing.`
+      : 'No free LibriVox audio with a suitable Gutenberg text match found. Try a different title.';
+    message.dataset.state = pairResults.length ? 'success' : 'empty';
     $('#pairResults').innerHTML = pairResults.map((pair) => {
       const authors = (pair.authors || []).join(', ');
-      const meta = [authors, pair.language, formatDuration(pair.duration_ms)].filter(Boolean).join(' · ');
+      const provider = pair.provider === 'internet_archive' ? 'Internet Archive · LibriVox' : 'LibriVox';
+      const match = pair.match_kind === 'title_author' ? 'Title + author suggestion' : 'Source-linked text';
+      const meta = [provider, authors, pair.narrator ? `Read by ${pair.narrator}` : '', pair.language, formatDuration(pair.duration_ms)]
+        .filter(Boolean).join(' · ');
+      const candidateCount = (pair.text_candidates || []).length;
       return `<article class="pair-result">
         <h3>${escapeHTML(pair.title)}</h3>
-        <p class="muted">${escapeHTML(meta || 'LibriVox audio · Project Gutenberg text')}</p>
+        <p class="muted">${escapeHTML(meta || 'LibriVox audio')}</p>
+        <p class="muted">${escapeHTML(match)}${candidateCount > 1 ? ` · ${candidateCount} Gutenberg editions` : ''}</p>
         <div class="pair-result-actions">
-          <a href="${escapeHTML(pair.gutenberg_url)}" target="_blank" rel="noopener noreferrer">View ebook source ↗</a>
-          <button type="button" class="button button-quiet" data-pair-id="${escapeHTML(pair.record_id)}">Import pair</button>
+          <a href="${escapeHTML(pair.audio_source_url || pair.librivox_url || '#')}" target="_blank" rel="noopener noreferrer">View audio source ↗</a>
+          <button type="button" class="button button-quiet" data-pair-id="${escapeHTML(pair.record_id)}">Review text</button>
         </div>
       </article>`;
     }).join('');
   } catch (error) {
     message.textContent = error.message || 'The paired-book catalog could not be searched.';
+    message.dataset.state = 'error';
   } finally {
     submit.disabled = false;
     submit.textContent = 'Search';
@@ -270,20 +280,69 @@ $('#pairResults').addEventListener('click', (event) => {
   if (!button) return;
   selectedPair = pairResults.find((pair) => pair.record_id === button.dataset.pairId);
   if (!selectedPair) return;
+  const candidates = selectedPair.text_candidates || (selectedPair.gutenberg_id ? [{
+    gutenberg_id: selectedPair.gutenberg_id,
+    title: selectedPair.title,
+    gutenberg_url: selectedPair.gutenberg_url,
+    match_basis: 'source_linked',
+  }] : []);
+  const requireMatchConfirmation = selectedPair.match_kind === 'title_author' || candidates.length > 1;
+  const textChoice = $('#pairTextChoice');
+  textChoice.replaceChildren();
+  for (const candidate of candidates) {
+    const option = document.createElement('option');
+    option.value = candidate.gutenberg_id;
+    const issued = candidate.issued ? ` · catalog ${candidate.issued.slice(0, 4)}` : '';
+    option.textContent = `${candidate.title || `Gutenberg ${candidate.gutenberg_id}`} · #${candidate.gutenberg_id}${issued}${candidate.author ? ` · ${candidate.author}` : ''}`;
+    textChoice.append(option);
+  }
+  const ambiguous = candidates.length > 1;
+  $('#pairTextChoiceWrap').hidden = !ambiguous;
+  if (ambiguous) {
+    const choose = document.createElement('option');
+    choose.value = '';
+    choose.textContent = 'Choose an edition…';
+    choose.selected = true;
+    textChoice.prepend(choose);
+  }
+  textChoice.value = candidates.length === 1 ? candidates[0].gutenberg_id : '';
   $('#pairTitle').textContent = selectedPair.title;
   $('#pairByline').textContent = [
     (selectedPair.authors || []).join(', '),
+    selectedPair.narrator ? `Read by ${selectedPair.narrator}` : '',
     selectedPair.language,
     formatDuration(selectedPair.duration_ms),
   ].filter(Boolean).join(' · ');
-  $('#pairLibrivoxLink').href = selectedPair.librivox_url;
-  $('#pairGutenbergLink').href = selectedPair.gutenberg_url;
+  const audioLink = $('#pairAudioLink');
+  audioLink.href = selectedPair.audio_source_url || selectedPair.librivox_url || '#';
+  audioLink.textContent = selectedPair.provider === 'internet_archive'
+    ? 'View Internet Archive audio item ↗'
+    : 'View LibriVox recording details ↗';
+  const libriVoxLink = $('#pairLibriVoxLink');
+  libriVoxLink.hidden = selectedPair.provider !== 'internet_archive' || !selectedPair.librivox_url;
+  libriVoxLink.href = selectedPair.librivox_url || '#';
+  $('#pairMatchNote').textContent = selectedPair.match_note || 'A Gutenberg ID is linked in the source metadata. Edition match is not verified.';
+  $('#pairMatchCheckWrap').hidden = !requireMatchConfirmation;
+  $('#pairMatchConfirmed').checked = false;
+  const gutenbergLink = $('#pairGutenbergLink');
+  const selectedCandidate = candidates.find((candidate) => candidate.gutenberg_id === textChoice.value);
+  gutenbergLink.href = selectedCandidate?.gutenberg_url || selectedPair.gutenberg_url || '#';
+  gutenbergLink.textContent = selectedCandidate
+    ? `View Gutenberg #${selectedCandidate.gutenberg_id} ↗`
+    : 'Choose a Gutenberg text above ↗';
   $('#pairImportMessage').textContent = '';
   $('#rightsConfirmed').checked = false;
   $('#pairResults').hidden = true;
   $('#pairSearchForm').hidden = true;
   $('#pairSearchMessage').hidden = true;
   $('#pairConfirm').hidden = false;
+});
+
+$('#pairTextChoice').addEventListener('change', () => {
+  const candidate = (selectedPair?.text_candidates || []).find((item) => item.gutenberg_id === $('#pairTextChoice').value);
+  const link = $('#pairGutenbergLink');
+  link.href = candidate?.gutenberg_url || '#';
+  link.textContent = candidate ? `View Gutenberg #${candidate.gutenberg_id} ↗` : 'Choose a Gutenberg text above ↗';
 });
 
 $('#pairImportSubmit').addEventListener('click', async (event) => {
@@ -294,6 +353,17 @@ $('#pairImportSubmit').addEventListener('click', async (event) => {
     message.textContent = 'Please confirm you may use these editions where you live.';
     return;
   }
+  const candidates = selectedPair.text_candidates || [];
+  const gutenbergID = $('#pairTextChoice').value || selectedPair.gutenberg_id ||
+    (candidates.length === 1 ? candidates[0].gutenberg_id : '');
+  if (!gutenbergID) {
+    message.textContent = 'Choose a Gutenberg edition to pair with this recording.';
+    return;
+  }
+  if ((selectedPair.match_kind === 'title_author' || candidates.length > 1) && !$('#pairMatchConfirmed').checked) {
+    message.textContent = 'Please confirm you reviewed the suggested text match.';
+    return;
+  }
   button.disabled = true;
   button.textContent = 'Importing…';
   message.textContent = 'Fetching the recording and EPUB, then preparing the synchronized reader…';
@@ -301,7 +371,11 @@ $('#pairImportSubmit').addEventListener('click', async (event) => {
     const book = await api(`/api/discovery/pairs/${encodeURIComponent(selectedPair.record_id)}/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rights_confirmed: true }),
+      body: JSON.stringify({
+        rights_confirmed: true,
+        gutenberg_id: gutenbergID,
+        match_confirmed: $('#pairMatchConfirmed').checked,
+      }),
     });
     $('#discoverDialog').close();
     await loadBooks();

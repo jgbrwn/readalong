@@ -102,9 +102,9 @@
   <dialog id="discoverDialog" class="sheet discover-sheet">
     <div class="discover-content">
       <button type="button" class="close-button" id="closeDiscover" aria-label="Close">×</button>
-      <p class="eyebrow">FREE, SOURCE-LINKED PAIRS</p>
+      <p class="eyebrow">FREE LIBRIVOX AUDIO + GUTENBERG TEXT</p>
       <h2>Find a paired book</h2>
-      <p class="muted">Search LibriVox recordings linked to Project Gutenberg text. A distinctive title phrase can still find a pair when small words are missing.</p>
+      <p class="muted">Search LibriVox recordings on Internet Archive. Some records link directly to a Gutenberg text; others need you to review a title-and-author match.</p>
       <form id="pairSearchForm" class="pair-search-form">
         <label for="pairSearch">Book title</label>
         <div class="pair-search-row">
@@ -118,11 +118,21 @@
         <button id="pairBack" type="button" class="button button-quiet">← Results</button>
         <h3 id="pairTitle"></h3>
         <p id="pairByline" class="muted"></p>
+        <p id="pairMatchNote" class="pair-match-note"></p>
+        <label id="pairTextChoiceWrap" class="pair-text-choice" hidden>
+          <span>Choose the Gutenberg text to pair</span>
+          <select id="pairTextChoice"></select>
+        </label>
         <p class="pair-source-links">
-          <a id="pairLibrivoxLink" target="_blank" rel="noopener noreferrer">LibriVox recording details ↗</a>
-          <a id="pairGutenbergLink" target="_blank" rel="noopener noreferrer">Project Gutenberg ebook ↗</a>
+          <a id="pairAudioLink" target="_blank" rel="noopener noreferrer">View audio source ↗</a>
+          <a id="pairLibriVoxLink" target="_blank" rel="noopener noreferrer" hidden>View LibriVox catalog record ↗</a>
+          <a id="pairGutenbergLink" target="_blank" rel="noopener noreferrer">View selected Gutenberg text ↗</a>
         </p>
-        <p class="pair-warning">The linked sources indicate a pairing, not a verified edition match. Availability and rights can vary by edition and country. Import downloads the full chapter archive, which may be large.</p>
+        <p class="pair-warning">Edition match is not guaranteed; alignment is scored after import. Confirm rights. The full audio archive may be large.</p>
+        <label id="pairMatchCheckWrap" class="rights-check" hidden>
+          <input id="pairMatchConfirmed" type="checkbox">
+          <span>I reviewed the selected text and believe it is the intended book for this recording.</span>
+        </label>
         <label class="rights-check">
           <input id="rightsConfirmed" type="checkbox">
           <span>I confirm I may use these specific audio and text editions where I live.</span>

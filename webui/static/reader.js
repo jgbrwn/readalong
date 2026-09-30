@@ -212,6 +212,7 @@ async function loadWindow(atMS) {
 
 function statusLabel(value) {
   if (value?.stage === 'rate_limited') return 'Queued to resume';
+  if (value?.stage === 'validating_ebook') return 'Checking selected ebook…';
   if (value?.stage === 'acquiring') return 'Finding audio…';
   if (value?.stage === 'normalizing') return 'Preparing audio…';
   if (value?.stage === 'transcribing') return 'Transcribing…';

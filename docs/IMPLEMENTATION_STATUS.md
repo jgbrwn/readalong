@@ -33,10 +33,13 @@ The first end-to-end implementation is present:
   matches, Readalong keeps the transcript view rather than showing an
   unbounded, untimed EPUB window.
 
-Pair discovery searches LibriVox's documented API and imports only records
-that link to Project Gutenberg text and an Archive.org audio archive. EPUBs
-are fetched from the Project Gutenberg mirror after a user confirms rights.
-This avoids scraping book pages and arbitrary user-supplied catalog URLs.
+Pair discovery searches Internet Archive's LibriVox collection and falls back
+to LibriVox's documented API. Explicit Gutenberg references in IA metadata
+are validated against the official Project Gutenberg catalog; when IA has no
+text link, exact title/creator/language candidates are shown for user
+selection rather than silently treated as source-linked. Import re-fetches
+and validates the IA item and its public MP3 files. The Gutenberg catalog
+snapshot is cached locally, and the importer accepts no arbitrary URL.
 
 **Phase 2 is implemented but not yet declared complete.** Exact alignment is
 covered by synthetic integration tests, and the full public-source ingestion

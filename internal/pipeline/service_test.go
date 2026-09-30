@@ -129,6 +129,48 @@ func TestUploadedAudioRunsThroughFirstUsableTranscript(t *testing.T) {
 	}
 }
 
+func TestPairedBookRejectsInvalidEPUBBeforeDownloadingIAAudio(t *testing.T) {
+	dataRoot := t.TempDir()
+	d, err := db.Open(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if _, err := d.UpsertUser(ctx, "ia-preflight-owner", "reader@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	bookID, jobID := "ia-preflight-book", "ia-preflight-job"
+	if err := d.CreateBookAndJob(ctx, db.NewBook{
+		ID: bookID, JobID: jobID, OwnerUserID: "ia-preflight-owner", Title: "Example",
+		SourceKind: "librivox", SourceURL: "https://archive.org/compress/example/formats=64KBPS%20MP3",
+		GutenbergID: "invalid-id",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, found, err := d.ClaimNextJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim pair job: found=%v err=%v", found, err)
+	}
+	dataDir := t.TempDir()
+	service := New(config.Config{DataDir: dataDir, MaxUploadBytes: 1 << 20}, d)
+	service.process(ctx, job)
+
+	book, err := d.BookByID(ctx, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Status != "error" || !strings.Contains(book.Error, "EPUB") {
+		t.Fatalf("invalid Gutenberg text did not fail early: %#v", book)
+	}
+	for _, name := range []string{"librivox.zip", "librivox.mp3"} {
+		path := filepath.Join(BookDirectory(dataDir, "ia-preflight-owner", bookID), "source", name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("invalid EPUB caused the audio archive to be downloaded: %s stat err=%v", name, err)
+		}
+	}
+}
+
 func TestUploadedAudioAndEPUBAlignCanonicalText(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

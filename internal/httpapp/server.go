@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/jgbrwn/readalong/internal/auth"
@@ -25,7 +26,12 @@ type Server struct {
 }
 
 func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler {
-	return NewWithCatalog(cfg, d, catalog.NewClient(), workers...)
+	catalogClient := catalog.NewClient()
+	catalogClient.EnableArchiveSearch()
+	if cfg.DataDir != "" {
+		catalogClient.CatalogCacheDir = filepath.Join(cfg.DataDir, "catalog-cache")
+	}
+	return NewWithCatalog(cfg, d, catalogClient, workers...)
 }
 
 func NewWithCatalog(cfg config.Config, d *db.DB, catalogClient *catalog.Client, workers ...*pipeline.Service) http.Handler {

@@ -23,6 +23,7 @@ const (
 	fallbackSearchTime = 45 * time.Second
 	cacheDuration      = 15 * time.Minute
 	maxResponseBytes   = 4 << 20
+	lvFallbackTimeout  = 8 * time.Second
 )
 
 type Author struct {
@@ -41,21 +42,46 @@ type Record struct {
 	TotalTime       string   `json:"totaltime"`
 	TotalTimeSecs   int64    `json:"totaltimesecs"`
 	Authors         []Author `json:"authors"`
+
+	Provider             string          `json:"-"`
+	ArchiveID            string          `json:"-"`
+	ArchiveSource        string          `json:"-"`
+	ArchiveDesc          string          `json:"-"`
+	ArchiveGutenbergRefs bool            `json:"-"`
+	ArchiveAudioURL      string          `json:"-"`
+	Narrator             string          `json:"-"`
+	TextCandidates       []TextCandidate `json:"-"`
 }
 
 type Response struct {
 	Books []Record `json:"books"`
 }
 
+type TextCandidate struct {
+	GutenbergID  string `json:"gutenberg_id"`
+	Title        string `json:"title"`
+	Author       string `json:"author,omitempty"`
+	Language     string `json:"language,omitempty"`
+	Issued       string `json:"issued,omitempty"`
+	GutenbergURL string `json:"gutenberg_url"`
+	MatchBasis   string `json:"match_basis"`
+}
+
 type Pair struct {
-	RecordID     string   `json:"record_id"`
-	Title        string   `json:"title"`
-	Authors      []string `json:"authors"`
-	Language     string   `json:"language"`
-	DurationMS   int64    `json:"duration_ms"`
-	LibriVoxURL  string   `json:"librivox_url"`
-	GutenbergID  string   `json:"gutenberg_id"`
-	GutenbergURL string   `json:"gutenberg_url"`
+	RecordID       string          `json:"record_id"`
+	Provider       string          `json:"provider"`
+	Title          string          `json:"title"`
+	Authors        []string        `json:"authors"`
+	Narrator       string          `json:"narrator,omitempty"`
+	Language       string          `json:"language"`
+	DurationMS     int64           `json:"duration_ms"`
+	AudioSourceURL string          `json:"audio_source_url"`
+	LibriVoxURL    string          `json:"librivox_url,omitempty"`
+	GutenbergID    string          `json:"gutenberg_id,omitempty"`
+	GutenbergURL   string          `json:"gutenberg_url,omitempty"`
+	MatchKind      string          `json:"match_kind"`
+	MatchNote      string          `json:"match_note,omitempty"`
+	TextCandidates []TextCandidate `json:"text_candidates,omitempty"`
 }
 
 type cacheEntry struct {
@@ -74,20 +100,37 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 
+	ArchiveEnabled      bool
+	ArchiveBaseURL      string
+	ArchiveRequestGap   time.Duration
+	GutenbergCatalogURL string
+	CatalogCacheDir     string
+
 	mu            sync.Mutex
 	lastRequest   time.Time
 	minRequestGap time.Duration
 	queries       map[string]cacheEntry
 	byID          map[string]recordEntry
+
+	archiveMu          sync.Mutex
+	archiveLastRequest time.Time
+	archiveQueries     map[string]cacheEntry
+	gutenbergMu        sync.Mutex
+	gutenbergCache     *gutenbergIndex
+	gutenbergRetryAt   time.Time
 }
 
 func NewClient() *Client {
 	return &Client{
-		BaseURL:       defaultLibriVoxAPI,
-		HTTP:          &http.Client{Timeout: 20 * time.Second},
-		minRequestGap: requestGap,
-		queries:       make(map[string]cacheEntry),
-		byID:          make(map[string]recordEntry),
+		BaseURL:             defaultLibriVoxAPI,
+		HTTP:                &http.Client{Timeout: 20 * time.Second},
+		ArchiveBaseURL:      defaultArchiveBase,
+		ArchiveRequestGap:   archiveRequestGap,
+		GutenbergCatalogURL: defaultGutenbergCatalog,
+		minRequestGap:       requestGap,
+		queries:             make(map[string]cacheEntry),
+		byID:                make(map[string]recordEntry),
+		archiveQueries:      make(map[string]cacheEntry),
 	}
 }
 
@@ -96,6 +139,34 @@ func (c *Client) Search(ctx context.Context, query string) ([]Pair, error) {
 	if len([]rune(query)) < 2 || len([]rune(query)) > 100 || hasControls(query) {
 		return nil, fmt.Errorf("search must be between 2 and 100 characters")
 	}
+	if c.ArchiveEnabled {
+		archiveCtx, archiveCancel := context.WithTimeout(ctx, archiveSearchTimeout)
+		archivePairs, archiveErr := c.searchArchive(archiveCtx, query)
+		archiveCancel()
+		if archiveErr == nil && len(archivePairs) > 0 {
+			return archivePairs, nil
+		}
+		fallbackCtx, cancel := context.WithTimeout(ctx, lvFallbackTimeout)
+		libriVoxPairs, libriVoxErr := c.searchLibriVox(fallbackCtx, query)
+		cancel()
+		if libriVoxErr == nil {
+			if len(libriVoxPairs) > 0 {
+				return libriVoxPairs, nil
+			}
+			if archiveErr != nil {
+				return nil, archiveErr
+			}
+			return []Pair{}, nil
+		}
+		if archiveErr != nil {
+			return nil, fmt.Errorf("Internet Archive and LibriVox catalogs are temporarily unavailable")
+		}
+		return nil, libriVoxErr
+	}
+	return c.searchLibriVox(ctx, query)
+}
+
+func (c *Client) searchLibriVox(ctx context.Context, query string) ([]Pair, error) {
 	key := strings.ToLower(query)
 	records, err := c.searchRecords(ctx, key, query)
 	if err != nil {
@@ -212,6 +283,9 @@ func titleContainsQueryTerms(title, query string) bool {
 }
 
 func (c *Client) ByID(ctx context.Context, id string) (Record, error) {
+	if strings.HasPrefix(id, archiveRecordPrefix) {
+		return c.archiveByID(ctx, strings.TrimPrefix(id, archiveRecordPrefix))
+	}
 	if !digitsOnly(id) || len(id) > 12 {
 		return Record{}, fmt.Errorf("invalid LibriVox record ID")
 	}
@@ -482,6 +556,9 @@ func validCatalogBase(u *url.URL) bool {
 }
 
 func ToPair(record Record) (Pair, bool) {
+	if record.Provider == "internet_archive" {
+		return makeArchivePair(record)
+	}
 	if !digitsOnly(record.ID) || record.Title == "" || len(record.Title) > 300 || !safeLibriVoxURL(record.URLLibriVox) {
 		return Pair{}, false
 	}
@@ -497,10 +574,16 @@ func ToPair(record Record) (Pair, bool) {
 		}
 	}
 	sort.Strings(authors)
+	gutenbergURL := "https://www.gutenberg.org/ebooks/" + gutenbergID
 	return Pair{
-		RecordID: record.ID, Title: record.Title, Authors: authors, Language: record.Language,
-		DurationMS: record.TotalTimeSecs * 1000, LibriVoxURL: record.URLLibriVox,
-		GutenbergID: gutenbergID, GutenbergURL: "https://www.gutenberg.org/ebooks/" + gutenbergID,
+		RecordID: record.ID, Provider: "librivox", Title: record.Title, Authors: authors, Language: record.Language,
+		DurationMS: record.TotalTimeSecs * 1000, AudioSourceURL: record.URLLibriVox,
+		LibriVoxURL: record.URLLibriVox, GutenbergID: gutenbergID, GutenbergURL: gutenbergURL,
+		MatchKind: "source_linked",
+		TextCandidates: []TextCandidate{{
+			GutenbergID: gutenbergID, Title: record.Title, Language: record.Language,
+			GutenbergURL: gutenbergURL, MatchBasis: "source_linked",
+		}},
 	}, true
 }
 

@@ -2,11 +2,27 @@
 
 ## Decision
 
-Use the official LibriVox audiobook API for discovery, then pair a record only
-when its `url_text_source` points to a numeric Project Gutenberg `/ebooks/` or
-`/etext/` record. Import the audio archive from the LibriVox API record and
-fetch the no-images EPUB from the Project Gutenberg mirror. The match is
-**source-linked, not edition-verified**.
+Use Internet Archive Advanced Search as the primary free-LibriVox audio
+catalog, restricted to `collection:librivoxaudio` and `mediatype:audio`.
+Re-fetch each selected item's metadata and require a public MP3 file before
+import. IA is the audio host/catalog here, not a new narration corpus.
+
+For the Gutenberg side:
+
+1. Prefer a numeric Gutenberg reference in the IA item's `source` or
+   `description`, and validate its title, author, and language against
+   Gutenberg's machine-readable catalog.
+2. If IA supplies no link, suggest **all** exact title/creator/language
+   matches from that catalog. The user must select an edition and explicitly
+   confirm the title/author match. Never silently pick one when several
+   editions exist.
+3. Import the selected EPUB from the fixed Gutenberg mirror, then let
+   Readalong's alignment coverage reveal mismatched or partial texts.
+
+Direct metadata links are **source-linked, not edition-verified**.
+Title/author suggestions are **unverified candidates**, not claimed pairs.
+The documented LibriVox API remains a short-timeout fallback when IA search
+is unavailable or yields no usable result.
 
 Readalong does not scrape Loyal Books pages. Although it offers convenient
 paired listings, the app does not need to depend on its page markup or reuse
@@ -22,11 +38,14 @@ integration.
 ## User flow
 
 1. Search by title from **Find a pair**.
-2. Review the LibriVox record and canonical Project Gutenberg page.
-3. Confirm that using these specific recordings/texts is permitted where the
-   user lives, then choose **Import audio + EPUB**.
-4. Readalong re-fetches the LibriVox record by its numeric ID and imports both
-   sources into the authenticated user's private shelf.
+2. Review the Internet Archive item, narrator/version, match basis, and
+   Gutenberg page. If IA had no text link, choose among the displayed catalog
+   candidates and confirm that you reviewed the match.
+3. Confirm that using these specific recording/text editions is permitted
+   where you live, then choose **Import audio + EPUB**.
+4. Readalong re-fetches the IA item by its validated identifier, downloads its
+   MP3 archive from Archive.org, and fetches the selected Gutenberg EPUB from
+   the fixed mirror.
 5. The alignment pipeline scores the EPUB/audio match. Strong matches default
    to ebook text; low-coverage matches default to the audio transcript. The
    reader allows an explicit switch to the EPUB without inventing word timing.
@@ -36,36 +55,69 @@ import form.
 
 ## Network behavior
 
-- Search uses the documented LibriVox JSON endpoint with a 20-record page,
-  a 15-minute in-process cache, and a three-second minimum gap between upstream
-  requests. Results are limited to HTTPS LibriVox records whose text source is
-  Project Gutenberg and whose audio archive is Archive.org.
+- Primary search uses Internet Archive Advanced Search with a 20-record page,
+  a 15-minute in-process cache, and a three-second minimum gap between IA
+  requests, under a 15-second overall search deadline. Its sanitized Lucene
+  query always requires
+  `collection:librivoxaudio` and `mediatype:audio`.
+- IA search requests only identifier, title, creator, language, source,
+  description, runtime, and date. Paid Audible/Apple/subscription listings
+  are outside this collection and are never accepted.
+- If an IA description includes a LibriVox catalog-page URL, the UI may expose
+  that official page as a human-review link. Readalong does not fetch/scrape
+  those HTML pages; the metadata/catalog matching path works independently.
+- A numeric Gutenberg ID is extracted only from IA `source` or `description`
+  metadata, then checked against Gutenberg's catalog. The candidate title,
+  creator, language, and catalog type (`Text`) must be compatible with the
+  recording metadata.
+  Description links to individual stories inside an anthology are rejected
+  when they do not match the audiobook title/creator.
+- If IA has no usable Gutenberg reference, exact normalized
+  title/creator/language matches with catalog `Type=Text` from the official
+  Gutenberg catalog are listed as candidates. Every candidate edition is
+  shown; no edition is silently chosen when several exist. Import revalidates
+  the selected ID and requires the user to confirm this inferred match.
+- The official `pg_catalog.csv.gz` is refreshed at most weekly and cached
+  under the app data directory. A stale parsed snapshot is reused if
+  Gutenberg is temporarily unavailable. Readalong does not scrape Gutenberg
+  search pages or fetch an EPUB for every result.
+- On import, Readalong re-fetches IA metadata and requires the same identifier,
+  `librivoxaudio` membership, `mediatype=audio`, and at least one non-private
+  MP3. It constructs the compressed MP3 URL from that validated identifier;
+  the browser never supplies an archive URL.
+- For paired audiobook imports, the selected Gutenberg EPUB is downloaded and
+  parsed before the large Archive.org MP3 ZIP, so a broken text edition does
+  not waste an audiobook download.
+- Search returns only LibriVox-collection recordings, so paid or
+  subscription-based services are excluded. Public MP3 availability is
+  checked again on import.
+- The documented LibriVox JSON endpoint is a fallback when IA search is down
+  or yields no usable results. It keeps the three-second request gap and has
+  an eight-second search deadline so a stalled origin cannot dominate latency.
 - LibriVox returns HTTP 404 with `Audiobooks could not be found` for an empty
-  title search; Readalong treats that no-result response as an empty result
-  list, not a provider outage. Transient upstream failures get at most one
-  retry, still separated by the configured request gap. HTTP 408 and transient
-  5xx responses are retried once. HTTP 429 is retried only when the server
-  supplies a `Retry-After` of at most 15 seconds; otherwise it is returned as
-  rate limiting rather than blindly retried. Longer `Retry-After` values on
-  transient failures also suppress the automatic retry.
+  title search; Readalong treats that response as no results, not an outage.
+  Transient failures get at most one retry. HTTP 408 and 5xx can retry; 429
+  retries only with `Retry-After` of at most 15 seconds. Longer requested
+  delays suppress an automatic retry.
 - If a full-title query has no eligible pair, Readalong makes one narrower
   trailing-phrase search for multiword queries and only keeps results whose
   title still contains every meaningful search term. This tolerates omitted
   connectors such as “of” without returning unrelated matches.
 - The optional trailing-phrase query has a 45-second ceiling so a slow first
   attempt can still receive its single bounded retry. It remains one query
-  phrase with at most two attempts; a provider-requested delay over 15 seconds
-  is reported rather than retried early.
+  phrase with at most two attempts; the production eight-second fallback
+  deadline further bounds this legacy path.
 - LibriVox's September 16, 2026 API notice set a 500-record maximum target
   for on/after September 26, 2026 and asks clients to leave several seconds
   between calls. The rollout status is not assumed; Readalong requests only
   20 records and keeps the throttle.
-- Import accepts a catalog record ID, never a user-supplied URL. It revalidates
-  the record and derives the Project Gutenberg ID from the approved host/path.
-- LibriVox ZIP requests are HTTPS-only, limited to Archive.org hosts, and
-  follow only Archive.org redirects. Archive.org's `zip_dir.php` redirect is
-  restricted to a `.zip` item path and MP3 format. DNS results are pinned and
-  checked as public before connection.
+- Import accepts a validated LibriVox numeric ID or a prefixed IA identifier,
+  never a user-supplied URL. The server re-fetches the provider record and
+  derives or revalidates the Gutenberg ID from approved metadata/catalog data.
+- Archive.org ZIP requests are HTTPS-only, limited to Archive.org hosts, and
+  follow only Archive.org redirects. IA's compressed-MP3 endpoint redirects
+  to a `.zip` item path and MP3 format. DNS results are pinned and checked as
+  public before connection.
 - ZIP extraction rejects traversal and symbolic links, caps the number of
   entries and aggregate uncompressed size, extracts MP3 tracks under generated
   local names, naturally sorts chapter filenames, and joins them with ffmpeg.
@@ -95,32 +147,55 @@ must check the particular text and recording. Neither title similarity nor a
 LibriVox `url_text_source` link proves that the spoken words and EPUB edition
 are identical.
 
-## Source research follow-up (September 29, 2026)
+## Source research follow-up (September 30, 2026)
 
-No provider was replaced. A live request for LibriVox record `391` returned
-HTTP 200 during this review; the original search for **Anne Green Gables**
-returned no title match, while the catalog title is **Anne of Green Gables**.
-Readalong now retries one distinctive trailing phrase after an empty
-multiword search and filters the results to titles containing all meaningful
-query words. This is a search-quality fallback, not a new provider.
+The LibriVox API worked for record `391` on September 29, but on September
+30 a fresh request to the same canonical host timed out when fetching a known
+record by ID; the `www` alias returned a TLS certificate error. The app now
+searches IA first and keeps the documented LibriVox API as a bounded fallback.
 
-On September 30, 2026, a fresh request from the VM to that same canonical
-LibriVox host timed out even when fetching a known record by ID; trying the
-`www` alias returned a TLS certificate error. The app's documented endpoint,
-query parameters, and server-side request format remain correct, so do not
-switch to the broken alias or interpret a 522 as a title no-match. The API's
-own rate guidance is still followed; a long `Retry-After` is surfaced instead
-of being ignored.
+Live IA tests found nine **Anne of Green Gables** LibriVox versions for the
+token query `collection:librivoxaudio AND mediatype:audio AND title:(anne AND
+green AND gables)`. They all have public audio but no Gutenberg ID in source
+metadata; the official Gutenberg catalog has four exact title/author/language
+records, so the UI shows all four and requires a deliberate choice. A live
+**Gift of the Magi** item (`giftofmagi`) explicitly references Gutenberg e-text
+7256, which the Gutenberg catalog confirms as the same title and O. Henry.
+
+IA item descriptions sometimes include a LibriVox catalog page URL. The
+original Anne page was reachable and linked its “Online text” to Gutenberg
+45, but a different version's page returned HTTP 522. This HTML fallback is
+not used in automated search/import; it is less stable than the IA metadata
+and Gutenberg catalog path.
 
 Other sources evaluated:
 
-- **Internet Archive, LibriVox collection:** its Advanced Search API can find
-  `collection:librivoxaudio` records, and its metadata API lists MP3/ZIP/M4B
-  files. A test record for **The Gift of the Magi** was marked public domain
-  and had downloadable audio, but its IA metadata did not carry a Gutenberg ID.
-  This is a useful alternate catalog/file host for the same LibriVox
-  recordings, not an independent narration corpus; matching an EPUB needs
-  separate validation.
+- **Internet Archive, LibriVox collection:** now the primary audio discovery
+  path. Advanced Search finds `collection:librivoxaudio` records; its metadata
+  API confirms item identity, collection, media type, and MP3 files; item
+  metadata may also include a license URL. For example, `giftofmagi` has
+  source metadata `Librivox recording of Gutenberg e-text #7256`; Gutenberg's
+  catalog confirms #7256 is **The Gift of the Magi** by O. Henry. This is an
+  exact metadata crosswalk, though edition alignment still needs scoring.
+- For titles without a Gutenberg reference, Gutenberg's `pg_catalog.csv.gz`
+  offers machine-readable `Text#`, type, title, authors, language, and issue
+  date. Only `Type=Text` records are candidates. **Anne of Green Gables** is a
+  useful warning case: IA search finds nine free LibriVox versions. Four
+  Gutenberg records share the exact title/author/language, but two are
+  `Sound` records and are excluded. Readalong offers the two text records
+  (#45 and #64365) for user review rather than guessing. A normalized text
+  comparison of their EPUBs found them very similar, but that does not prove
+  which edition any particular recording used.
+- IA descriptions can also contain Gutenberg URLs, but not every URL is the
+  text for the full audiobook. For example, the IA description for **Seven
+  Men** links Gutenberg texts for two individual stories. The matcher rejects
+  those when their titles do not match the audiobook. This title/author
+  validation is important even when a Gutenberg ID is present in metadata.
+- An IA item's description sometimes links to its official LibriVox catalog
+  page; the original Anne page exposed an `Online text` link to Gutenberg
+  #45. This could strengthen matching on demand, but it is an HTML-page
+  fallback rather than a documented API, and another version page returned
+  HTTP 522 during testing. It is not part of automatic search/import.
 - **Digitalbook.io:** its search combines free LibriVox entries with paid
   Audible/Apple listings. A tested free **Anne of Green Gables** result pointed
   to chapter MP3s hosted on Archive.org; the matching IA item is in
@@ -155,12 +230,20 @@ Other sources evaluated:
 
 Before adding a new source, validate rights, stable discovery/download
 interfaces, Gutenberg ID extraction, and at least one matching recording.
-The TTS collection is the best candidate for a genuinely non-LibriVox
-alternative; the Internet Archive LibriVox collection is a resilience fallback
-if the LibriVox site/API is temporarily unavailable.
+The TTS collection remains the best evaluated candidate for a genuinely
+non-LibriVox narration source; IA provides the resilient catalog/file path
+for LibriVox recordings.
 
 ## Primary references
 
+- Internet Archive Advanced Search API:
+  https://archive.org/developers/search.html
+- Internet Archive Metadata API:
+  https://archive.org/developers/metadata.html
+- Internet Archive Advanced Search endpoint:
+  https://archive.org/advancedsearch.php
+- Internet Archive item metadata endpoint:
+  https://archive.org/metadata/
 - LibriVox API documentation: https://librivox.org/api/info
 - LibriVox API update, published September 16, 2026:
   https://librivox.org/2026/09/16/librivox-api-update/
@@ -170,6 +253,8 @@ if the LibriVox site/API is temporarily unavailable.
   https://www.gutenberg.org/policy/robot_access.html
 - Project Gutenberg catalog linking policy:
   https://www.gutenberg.org/policy/linking.html
+- Project Gutenberg machine-readable catalog:
+  https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv.gz
 - Project Gutenberg terms:
   https://www.gutenberg.org/policy/terms_of_use.html
 - Digitalbook.io Terms & Conditions:

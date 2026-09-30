@@ -25,9 +25,9 @@ private.
 - Upload an audiobook and EPUB together; reflow the EPUB spine and align its
   canonical words to transcript timestamps with a confidence-scored fallback.
 - Search your bookshelf by title or author.
-- Find free, source-linked candidates in LibriVox and Project
-  Gutenberg by title or distinctive phrase, then import the recording and EPUB
-  together.
+- Search free LibriVox audio on Internet Archive and match it to Project
+  Gutenberg text. Prefer source-linked IDs; when IA omits one, show exact
+  title/author candidates for the user to verify before import.
 - Read with absolute-time word highlighting, tap-to-seek, playback speed, saved
   position, and per-book appearance/sync settings.
 - Use a private exe.dev-authenticated bookshelf with automatic account
@@ -46,15 +46,16 @@ bookshelf or uploaded audiobook is shown.
 </p>
 
 **Alignment caveat:** Readalong can now extract EPUB text and align it against
-the audiobook transcript. Pair discovery confirms that sources are linked; it
-does not guarantee an identical edition. When text match confidence is low,
-the reader defaults to the transcript and never animates untimed ebook words.
+the audiobook transcript. A source link or exact title/author candidate is not
+proof of an identical edition. When text match confidence is low, the reader
+defaults to the transcript and never animates untimed ebook words.
 This first EPUB implementation still needs validation across varied real
 editions. R2/Litestream backup/restore is not implemented yet. Generic yt-dlp
 webpage extraction is also not enabled; use YouTube URLs, direct media URLs,
-or the paired-book discovery results for now. Source-linked listings are not a
-worldwide rights guarantee; verify the particular recording, text, and
-translation for your use.
+or the paired-book discovery results for now. Search uses public catalog
+metadata; media is downloaded only after the user confirms the selected pair.
+Source links and title/author candidates are not worldwide rights guarantees;
+verify the particular recording, text, and translation for your use.
 
 ## Stack
 
@@ -77,9 +78,10 @@ Audio, transcripts, SQLite state, and progress are stored under `APP_DATA_DIR`
 on the VM. Audio chunks are sent to Groq for transcription. By default, media
 and database files remain local; optional R2 backup requires separate,
 bucket-scoped credentials. API ownership is keyed by the exe.dev stable user
-ID, not by email. Selecting a paired-catalog result causes the server to fetch
-its public LibriVox archive and Project Gutenberg EPUB into that user's private
-library; neither provider is contacted until the user requests an import.
+ID, not by email. Pair searches send the title query to Internet Archive (and
+use LibriVox as a bounded fallback); the server also refreshes a public
+Project Gutenberg metadata catalog weekly. Audio and the selected EPUB are
+downloaded into the private library only after the user confirms an import.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and

@@ -235,7 +235,9 @@ func (s *Server) importPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		RightsConfirmed bool `json:"rights_confirmed"`
+		RightsConfirmed bool   `json:"rights_confirmed"`
+		MatchConfirmed  bool   `json:"match_confirmed"`
+		GutenbergID     string `json:"gutenberg_id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	dec := json.NewDecoder(r.Body)
@@ -257,6 +259,15 @@ func (s *Server) importPair(w http.ResponseWriter, r *http.Request) {
 	pair, ok := catalog.ToPair(record)
 	if !ok {
 		http.Error(w, "this record has no supported Gutenberg EPUB pair", http.StatusBadRequest)
+		return
+	}
+	pair, ok = catalog.SelectTextCandidate(pair, req.GutenbergID)
+	if !ok {
+		http.Error(w, "choose a Gutenberg text candidate from the current search results", http.StatusBadRequest)
+		return
+	}
+	if (pair.MatchKind == "title_author" || len(pair.TextCandidates) > 1) && !req.MatchConfirmed {
+		http.Error(w, "confirm that you reviewed the suggested Gutenberg text for this recording", http.StatusBadRequest)
 		return
 	}
 	id, err := randomID()

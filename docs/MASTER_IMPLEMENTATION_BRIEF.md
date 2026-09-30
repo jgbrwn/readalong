@@ -8,7 +8,9 @@ Create a private web/PWA reader that combines the best ideas from HushBook/Spokt
 - remotely transcribe with Groq rather than making the phone do ASR;
 - play audio with lyric-style synchronized words;
 - pair audio with EPUB text and align the narration to the canonical ebook words;
-- discover/import free, source-linked LibriVox + Project Gutenberg pairs;
+- discover/import free LibriVox audio + Project Gutenberg pairs, preferring
+  explicit source links and clearly labeling user-confirmed title/author
+  candidates when catalogs omit the ebook ID;
 - search a user's private bookshelf by title or author;
 - maintain a private exe.dev-authenticated bookshelf.
 
@@ -49,10 +51,12 @@ Exit criterion: YouTube audiobook -> ready first section -> stable word highligh
 ## Phase 2 — EPUB aligned mode and paired discovery
 
 Implemented first pass: EPUB spine extraction, quality-scored sentence-local
-alignment, dual-mode reader, source-linked pair discovery, and owner-scoped
-book search. Continue validating against real editions before calling Phase 2
-complete. Details are in `SYNC_AND_ALIGNMENT.md` and
-`PAIRED_CATALOG.md`.
+alignment, dual-mode reader, paired discovery/import, and owner-scoped book
+search. Discovery prefers source-linked LibriVox/Gutenberg records and also
+offers carefully labeled, user-confirmed Gutenberg candidates from the
+Internet Archive LibriVox collection. Continue validating against real
+editions before calling Phase 2 complete. Details are in
+`SYNC_AND_ALIGNMENT.md` and `PAIRED_CATALOG.md`.
 
 Start with a clean reflowed representation of publisher text. Do not get stuck preserving arbitrary EPUB styling.
 

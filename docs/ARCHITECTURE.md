@@ -13,8 +13,8 @@ Go app on dedicated exe.dev VM
    |- local persistent book files
    |- yt-dlp / ffmpeg / ffprobe
    |- Groq Whisper API
-   |- LibriVox catalog API (throttled/cache)
-   |- Project Gutenberg/Archive.org approved source fetch
+   |- Internet Archive LibriVox catalog (throttled/cache), LibriVox API fallback
+   |- Project Gutenberg catalog snapshot + Archive.org approved source fetch
    `- background worker
 
 Optional future durable layer (Phase 3; not enabled by default)
@@ -89,14 +89,19 @@ Accepted inputs:
 - local uploaded audio (`mp3`, `m4a`, `m4b`, `wav`, `flac`, `ogg`, `opus`, `webm`, `mp4` audio track);
 - YouTube URL;
 - direct HTTP(S) audio URL;
-- source-linked LibriVox recording + Project Gutenberg EPUB pair;
+- LibriVox-collection audio on Internet Archive + a source-linked or
+  user-confirmed Project Gutenberg EPUB candidate;
 - other yt-dlp-supported webpage URLs are deferred.
 
-Paired-catalog search uses the documented LibriVox API, caches results, and
-spaces upstream requests. The client only returns records whose text-source
-URL maps to a canonical numeric Gutenberg ID and whose audio archive is on
-Archive.org. On import, the server re-fetches the record and derives the
-Gutenberg mirror path from that ID; no arbitrary URL is accepted.
+Paired-catalog search starts with Internet Archive Advanced Search filtered to
+the LibriVox audio collection and caches results. Explicit Gutenberg references
+in IA metadata are checked against the Project Gutenberg machine-readable
+catalog. When no reference exists, exact title/creator/language candidates are
+shown for user review; ambiguous editions are never silently selected. The
+documented LibriVox API is a bounded fallback. On import, the server re-fetches
+the IA item and validates its collection and public MP3 files, then derives the
+Archive.org and Gutenberg URLs from validated IDs. No arbitrary URL is
+accepted.
 `docs/PAIRED_CATALOG.md` documents source policy, rights caveats, and network
 guards.
 
