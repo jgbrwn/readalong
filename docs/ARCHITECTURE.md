@@ -15,6 +15,8 @@ Go app on dedicated exe.dev VM
    |- Groq Whisper API
    |- Internet Archive LibriVox catalog (throttled/cache), LibriVox API fallback
    |- Project Gutenberg catalog snapshot + Archive.org approved source fetch
+   |- Open Library cover search/cache (throttled, title/author only)
+   |- Reflection-discovered managed LLM catalog for optional SVG cover design
    `- background worker
 
 Optional future durable layer (Phase 3; not enabled by default)
@@ -50,9 +52,11 @@ the ownership key. Admins are configured by stable IDs with
 role to the first matching authenticated identity; that grant is then claimed
 and permanently bound to its stable exe.dev user ID.
 
-An admin remains an ordinary user for bookshelf operations. Admin-only APIs
-are separate and initially support inspecting accounts and suspending or
-reactivating access. Admin rights do not bypass per-book ownership checks.
+An admin remains an ordinary user for normal bookshelf/media operations;
+admin status does not bypass those per-book owner checks. Separate admin-only
+APIs can inspect accounts and suspend/reactivate access. Explicitly audited
+clone/transfer operations are the only admin workflows that act across book
+owners.
 
 ## Storage model
 
@@ -70,7 +74,9 @@ data/
     book.json
     transcript.v1.json.gz
     alignment.v1.json.gz
-    cover.jpg
+    cover/epub.jpg
+    cover/audio.jpg
+    cover/generated.svg
     work/
 ```
 
@@ -82,9 +88,22 @@ fast. R2 is for restoration/durability first and is not enabled by default.
 
 ## Background work
 
-Use a single persisted `jobs` table and an in-process worker. Default concurrency 1 for book pipelines; Groq transcription substeps can have separately controlled concurrency.
+Use a single persisted `jobs` table and an in-process worker. Default concurrency 1 for book pipelines; Groq transcription substeps can have separately controlled concurrency. Cover reconciliation and admin book copies use separate persisted state/queues so they never become the latest transcription job or change reader readiness.
 
 On process startup, stale `running` jobs become `queued` again. Every stage is idempotent and writes an artifact only after successful completion. This makes restart/resume straightforward without Redis.
+
+Cover reconciliation backfills existing books, claims due work across all
+owners through SQLite leases, and persists provider retry/backoff state.
+Metadata lookups are shared through a hashed title/author cache; the worker
+spaces Open Library requests and never fetches its cover corpus in bulk.
+
+Admin clone/transfer is a separate persisted operation. It only accepts a
+fully processed, idle book, copies artifacts independently to an owner-scoped
+staging directory, and publishes database ownership/paths only after the copy
+is validated. Clone resets personal reading progress and does not copy
+runnable jobs. Transfer changes the stable owner ID, updates historical job
+ownership, resets progress, and removes the former owner directory after
+publication.
 
 ## Source acquisition
 

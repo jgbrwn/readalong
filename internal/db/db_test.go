@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -111,6 +113,261 @@ func TestShelfSearchIsOwnerScopedAndMatchesTitleOrAuthor(t *testing.T) {
 		} else if len(books) != 1 || books[0].ID != want {
 			t.Fatalf("query %q results = %#v; want %s", query, books, want)
 		}
+	}
+}
+
+func TestShelfSortOrdersAreStableAndOwnerScoped(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "sort-owner", "sort@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UpsertUser(ctx, "other-owner", "other@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, book := range []struct {
+		id, owner, title, author, created string
+		duration                          int64
+	}{
+		{"book-b", "sort-owner", "Zebra", "Zoe Author", "2026-01-01", 1000},
+		{"book-a", "sort-owner", "Alpha", "Amy Author", "2026-02-01", 2000},
+		{"book-c", "sort-owner", "Middle", "Amy Author", "2026-03-01", 1000},
+		{"private", "other-owner", "Aardvark", "A. Private", "2026-04-01", 1000},
+	} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO books(id,owner_user_id,title,author,duration_ms,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?)`, book.id, book.owner, book.title, book.author, book.duration, book.created, book.created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, progress := range []struct {
+		bookID, updated string
+		position        int64
+	}{
+		{"book-b", "2026-03-01T00:00:00Z", 900},
+		{"book-a", "2026-04-01T00:00:00Z", 1000},
+	} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO reading_progress(user_id,book_id,position_ms,updated_at)
+			VALUES('sort-owner',?,?,?)`, progress.bookID, progress.position, progress.updated); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		sort string
+		want []string
+	}{
+		{"recent", []string{"book-c", "book-a", "book-b"}},
+		{"title", []string{"book-a", "book-c", "book-b"}},
+		{"author", []string{"book-a", "book-c", "book-b"}},
+		{"lastread", []string{"book-a", "book-b", "book-c"}},
+		{"progress", []string{"book-b", "book-a", "book-c"}},
+	}
+	for _, test := range tests {
+		books, err := d.SearchBooksForUserSorted(ctx, "sort-owner", "", test.sort)
+		if err != nil {
+			t.Fatalf("sort %q: %v", test.sort, err)
+		}
+		got := make([]string, len(books))
+		for i := range books {
+			got[i] = books[i].ID
+		}
+		if !reflect.DeepEqual(got, test.want) {
+			t.Errorf("sort %q = %v, want %v", test.sort, got, test.want)
+		}
+	}
+}
+
+func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	for _, user := range []struct{ id, email string }{
+		{"book-owner", "owner@example.org"},
+		{"recipient", "recipient@example.org"},
+		{"admin", "admin@example.org"},
+	} {
+		if _, err := d.UpsertUser(ctx, user.id, user.email, false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quality := 0.93
+	if _, err := d.ExecContext(ctx, `INSERT INTO books
+		(id,owner_user_id,title,author,source_kind,mode,status,duration_ms,audio_relpath,epub_relpath,
+		 ebook_json_relpath,transcript_relpath,alignment_relpath,alignment_quality,gutenberg_id,ebook_source_url,created_at,updated_at)
+		VALUES('original','book-owner','Example','Ada Author','upload','aligned','ready',1000,
+		 'books/owner/original/playback.mp3','books/owner/original/book.epub',
+		 'books/owner/original/ebook.json.gz','books/owner/original/transcript.json.gz',
+		 'books/owner/original/alignment.json.gz',?,'123','https://www.gutenberg.org/ebooks/123','2026-01-01','2026-01-01')`,
+		quality); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO jobs(id,owner_user_id,book_id,kind,status,stage,progress,created_at,updated_at)
+		VALUES('original-job','book-owner','original','book','completed','ready',1,'2026-01-01','2026-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO book_cover_state
+		(book_id,status,selected_kind,selected_relpath,selected_provider,selected_year,lookup_paused,updated_at)
+		VALUES('original','selected','ai_svg','books/owner/original/cover/generated.svg',
+			'Readalong vector art',1935,1,'2026-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO chapters(id,book_id,ordinal,title,start_ms,end_ms,transcript_state,alignment_quality)
+		VALUES('original-chapter','original',2,'Chapter Two',100,900,'complete',?)`, quality); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO reading_progress(user_id,book_id,position_ms,playback_rate,updated_at)
+		VALUES('book-owner','original',800,1.5,'2026-01-02')`); err != nil {
+		t.Fatal(err)
+	}
+
+	operation := AdminBookOperation{
+		ID: "clone-operation", ActorUserID: "admin", Mode: "clone", BookID: "original",
+		SourceOwnerUserID: "book-owner", TargetOwnerUserID: "recipient", TargetBookID: "clone-id",
+	}
+	if err := d.QueueAdminBookOperation(ctx, operation); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextAdminBookOperation(ctx); err != nil || !found {
+		t.Fatal(err)
+	}
+	if err := d.CloneReadyBookForAdmin(ctx, operation, BookArtifactPaths{
+		Audio: "books/recipient/clone-id/playback.mp3", EPUB: "books/recipient/clone-id/book.epub",
+		EbookJSON: "books/recipient/clone-id/ebook.json.gz", Transcript: "books/recipient/clone-id/transcript.json.gz",
+		Alignment:     "books/recipient/clone-id/alignment.json.gz",
+		CoverSelected: "books/recipient/clone-id/cover/generated.svg",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BookForUser(ctx, "recipient", "clone-id"); !errors.Is(err, ErrBookNotFound) {
+		t.Fatalf("recipient saw clone before publication completed: %v", err)
+	}
+	books, err := d.BooksForUser(ctx, "recipient")
+	if err != nil || len(books) != 0 {
+		t.Fatalf("recipient bookshelf exposed in-progress clone: books=%#v err=%v", books, err)
+	}
+	if err := d.SaveProgress(ctx, "recipient", "clone-id", 200, 1, 0, "{}"); !errors.Is(err, ErrBookOperationInProgress) {
+		t.Fatalf("recipient wrote progress during clone publication: %v", err)
+	}
+	if err := d.CompleteAdminBookOperation(ctx, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	clone, err := d.BookForUser(ctx, "recipient", "clone-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clone.Title != "Example" || clone.Author != "Ada Author" || clone.Status != "ready" ||
+		clone.GutenbergID != "123" || clone.AlignmentQuality == nil || *clone.AlignmentQuality != quality ||
+		clone.AudioRelPath != "books/recipient/clone-id/playback.mp3" || clone.JobStatus != "completed" ||
+		clone.CoverKind != "ai_svg" || clone.CoverYear != 1935 ||
+		clone.CoverURL != "/api/books/clone-id/cover/selected" {
+		t.Fatalf("unexpected cloned book: %#v", clone)
+	}
+	if _, err := d.BookForUser(ctx, "book-owner", "original"); err != nil {
+		t.Fatalf("source book was not retained: %v", err)
+	}
+	if job, err := d.JobStatus(ctx, "clone-id"); err != nil || job.Kind != "book" ||
+		job.Status != "completed" || job.ID != "clone-id-clone" {
+		t.Fatalf("clone completion marker=%#v err=%v", job, err)
+	}
+	chapters, err := d.Chapters(ctx, "clone-id")
+	if err != nil || len(chapters) != 1 {
+		t.Fatalf("clone chapters=%#v err=%v", chapters, err)
+	}
+	var chapterQuality sql.NullFloat64
+	var chapterID, transcriptState string
+	if err := d.QueryRowContext(ctx, `SELECT id,transcript_state,alignment_quality FROM chapters WHERE book_id='clone-id'`).
+		Scan(&chapterID, &transcriptState, &chapterQuality); err != nil {
+		t.Fatal(err)
+	}
+	if chapterID != "clone-id-ch-000002" || transcriptState != "complete" ||
+		chapterQuality.Float64 != quality || !chapterQuality.Valid {
+		t.Fatalf("chapter quality was not preserved: %#v", chapterQuality)
+	}
+	var progressCount int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM reading_progress WHERE book_id='clone-id'`).Scan(&progressCount); err != nil {
+		t.Fatal(err)
+	}
+	if progressCount != 0 {
+		t.Fatalf("clone inherited %d personal progress row(s)", progressCount)
+	}
+	secondClone := AdminBookOperation{
+		ID: "clone-operation-again", ActorUserID: "admin", Mode: "clone", BookID: "clone-id",
+		SourceOwnerUserID: "recipient", TargetOwnerUserID: "book-owner", TargetBookID: "clone-again",
+	}
+	if err := d.QueueAdminBookOperation(ctx, secondClone); err != nil {
+		t.Fatalf("completed clone could not be copied again: %v", err)
+	}
+}
+
+func TestAdminTransferChangesOwnershipAndRevokesOldProgressWrites(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	for _, user := range []struct{ id, email string }{
+		{"book-owner", "owner@example.org"},
+		{"recipient", "recipient@example.org"},
+		{"admin", "admin@example.org"},
+	} {
+		if _, err := d.UpsertUser(ctx, user.id, user.email, false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO books(id,owner_user_id,title,source_url,status,duration_ms,audio_relpath,transcript_relpath,created_at,updated_at)
+		VALUES('moving','book-owner','Move me','https://media.example/audio?token=private','ready',1000,'books/old/moving/playback.mp3','books/old/moving/transcript.json.gz','2026-01-01','2026-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO jobs(id,owner_user_id,book_id,kind,status,stage,progress,created_at,updated_at)
+		VALUES('moving-job','book-owner','moving','book','completed','ready',1,'2026-01-01','2026-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveProgress(ctx, "book-owner", "moving", 700, 1, 0, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	operation := AdminBookOperation{
+		ID: "move-operation", ActorUserID: "admin", Mode: "transfer", BookID: "moving",
+		SourceOwnerUserID: "book-owner", TargetOwnerUserID: "recipient", TargetBookID: "moving",
+	}
+	if err := d.QueueAdminBookOperation(ctx, operation); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextAdminBookOperation(ctx); err != nil || !found {
+		t.Fatalf("claim found=%v err=%v", found, err)
+	}
+	if err := d.TransferReadyBookForAdmin(ctx, operation, BookArtifactPaths{
+		Audio: "books/new/moving/playback.mp3", Transcript: "books/new/moving/transcript.json.gz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BookForUser(ctx, "recipient", "moving"); !errors.Is(err, ErrBookNotFound) {
+		t.Fatalf("recipient saw book before transfer cleanup: %v", err)
+	}
+	if err := d.SaveProgress(ctx, "recipient", "moving", 200, 1, 0, "{}"); !errors.Is(err, ErrBookOperationInProgress) {
+		t.Fatalf("recipient wrote progress during transfer: %v", err)
+	}
+	if err := d.CompleteAdminBookOperation(ctx, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BookForUser(ctx, "book-owner", "moving"); !errors.Is(err, ErrBookNotFound) {
+		t.Fatalf("former owner retained access: %v", err)
+	}
+	book, err := d.BookForUser(ctx, "recipient", "moving")
+	if err != nil || book.AudioRelPath != "books/new/moving/playback.mp3" {
+		t.Fatalf("recipient book=%#v err=%v", book, err)
+	}
+	if err := d.SaveProgress(ctx, "book-owner", "moving", 900, 1, 0, "{}"); !errors.Is(err, ErrBookNotFound) {
+		t.Fatalf("former owner could write progress: %v", err)
+	}
+	var jobOwner string
+	if err := d.QueryRowContext(ctx, `SELECT owner_user_id FROM jobs WHERE id='moving-job'`).Scan(&jobOwner); err != nil {
+		t.Fatal(err)
+	}
+	if jobOwner != "recipient" {
+		t.Fatalf("historical job owner = %q", jobOwner)
+	}
+	var sourceURL sql.NullString
+	if err := d.QueryRowContext(ctx, `SELECT source_url FROM books WHERE id='moving'`).Scan(&sourceURL); err != nil {
+		t.Fatal(err)
+	}
+	if sourceURL.Valid {
+		t.Fatalf("transfer retained source URL %q", sourceURL.String)
 	}
 }
 

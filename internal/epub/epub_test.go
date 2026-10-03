@@ -2,6 +2,10 @@ package epub
 
 import (
 	"archive/zip"
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +41,7 @@ func writeEPUB(t *testing.T, entries map[string]string) string {
 func fixtureEntries() map[string]string {
 	return map[string]string{
 		"META-INF/container.xml":    `<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
-		"OEBPS/package.opf":         `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title><dc:creator>A. Writer</dc:creator><dc:language>en</dc:language></metadata><manifest><item id="ch1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="nav"/><itemref idref="ch1"/></spine></package>`,
+		"OEBPS/package.opf":         `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title><dc:creator>A. Writer</dc:creator><dc:language>en</dc:language><dc:description>A sample story description.</dc:description></metadata><manifest><item id="ch1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="nav"/><itemref idref="ch1"/></spine></package>`,
 		"OEBPS/nav.xhtml":           `<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><p>Navigation must not become book text.</p></nav></body></html>`,
 		"OEBPS/text/chapter1.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Hidden</title></head><body><h1>Chapter One</h1><p>Hello, world! This is a test.</p><blockquote><p>“A quotation,” she said.</p></blockquote></body></html>`,
 	}
@@ -49,7 +53,8 @@ func TestParseSpineAndExtractSemanticText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.Title != "Test Book" || doc.Author != "A. Writer" || doc.Language != "en" {
+	if doc.Title != "Test Book" || doc.Author != "A. Writer" || doc.Language != "en" ||
+		doc.Description != "A sample story description." {
 		t.Fatalf("metadata = %#v", doc)
 	}
 	if len(doc.Chapters) != 1 || doc.Chapters[0].Title != "Chapter One" {
@@ -63,6 +68,43 @@ func TestParseSpineAndExtractSemanticText(t *testing.T) {
 	}
 	if got := doc.Chapters[0].Blocks[1].Sentences[1].Words[0]; got != "This" {
 		t.Fatalf("second sentence first word = %q", got)
+	}
+}
+
+func TestExtractCoverNormalizesDeclaredEPUBImage(t *testing.T) {
+	var cover bytes.Buffer
+	source := image.NewRGBA(image.Rect(0, 0, 160, 240))
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 160; x++ {
+			source.Set(x, y, color.RGBA{R: 40, G: uint8(y), B: 90, A: 255})
+		}
+	}
+	if err := png.Encode(&cover, source); err != nil {
+		t.Fatal(err)
+	}
+	entries := fixtureEntries()
+	entries["OEBPS/package.opf"] = `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title><dc:creator>A. Writer</dc:creator><dc:language>en</dc:language><dc:date>1935-04-12</dc:date><meta name="cover" content="front"/></metadata><manifest><item id="front" href="images/front.png" media-type="image/png"/><item id="ch1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>`
+	entries["OEBPS/images/front.png"] = cover.String()
+
+	normalized, year, err := ExtractCoverFileWithYear(writeEPUB(t, entries))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if year != 1935 {
+		t.Fatalf("cover edition year = %d, want 1935", year)
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(normalized))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "jpeg" || config.Width != 160 || config.Height != 240 {
+		t.Fatalf("normalized cover is %s %dx%d", format, config.Width, config.Height)
+	}
+}
+
+func TestExtractCoverRequiresDeclaredCover(t *testing.T) {
+	if _, err := ExtractCoverFile(writeEPUB(t, fixtureEntries())); err == nil {
+		t.Fatal("undeclared decorative image was treated as a book cover")
 	}
 }
 

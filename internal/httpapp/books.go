@@ -2,6 +2,7 @@ package httpapp
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -378,10 +379,27 @@ func (s *Server) deleteBook(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if s.pipeline != nil {
-		s.pipeline.CancelBook(book.ID)
+	if err := s.db.BeginBookDeletion(r.Context(), u.ID, book.ID); err != nil {
+		switch {
+		case errors.Is(err, db.ErrBookNotFound):
+			http.NotFound(w, r)
+		case errors.Is(err, db.ErrBookOperationInProgress), errors.Is(err, db.ErrBookCoverInProgress),
+			errors.Is(err, db.ErrBookDeleteInProgress), errors.Is(err, db.ErrBookJobInProgress):
+			http.Error(w, "this book is being updated; try again shortly", http.StatusConflict)
+		default:
+			http.Error(w, "could not prepare book removal", http.StatusInternalServerError)
+		}
+		return
 	}
 	if err := s.db.DeleteBook(r.Context(), u.ID, book.ID); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.db.CancelBookDeletion(cleanupCtx, u.ID, book.ID)
+		cancel()
+		if errors.Is(err, db.ErrBookOperationInProgress) || errors.Is(err, db.ErrBookCoverInProgress) ||
+			errors.Is(err, db.ErrBookDeleteInProgress) {
+			http.Error(w, "this book is being updated; try again shortly", http.StatusConflict)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -554,6 +572,10 @@ func (s *Server) updateProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.db.SaveProgress(r.Context(), u.ID, book.ID, req.PositionMS, req.PlaybackRate,
 		req.SyncOffsetMS, appearance); err != nil {
+		if errors.Is(err, db.ErrBookNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Error(w, "could not save progress", http.StatusInternalServerError)
 		return
 	}
@@ -564,6 +586,18 @@ func (s *Server) retryBook(w http.ResponseWriter, r *http.Request) {
 	u, _ := auth.UserFromContext(r.Context())
 	id := r.PathValue("id")
 	if err := s.db.RetryJob(r.Context(), u.ID, id); err != nil {
+		if errors.Is(err, db.ErrBookOperationInProgress) {
+			http.Error(w, "this book is being transferred or cloned", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, db.ErrBookCoverInProgress) {
+			http.Error(w, "this book cover is being updated; try again shortly", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, db.ErrBookDeleteInProgress) {
+			http.Error(w, "this book is being removed; try again shortly", http.StatusConflict)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -596,6 +630,10 @@ func (s *Server) retranscribeBook(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 		case errors.Is(err, db.ErrBookJobInProgress):
 			http.Error(w, "this book already has a job in progress", http.StatusConflict)
+		case errors.Is(err, db.ErrBookOperationInProgress):
+			http.Error(w, "this book is being transferred or cloned", http.StatusConflict)
+		case errors.Is(err, db.ErrBookDeleteInProgress):
+			http.Error(w, "this book is being removed; try again shortly", http.StatusConflict)
 		case errors.Is(err, db.ErrRetranscriptionNotReady):
 			http.Error(w, "the book must be ready with audio and a transcript before re-transcribing", http.StatusConflict)
 		default:

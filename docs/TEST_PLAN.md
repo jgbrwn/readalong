@@ -118,7 +118,55 @@
 
 - Search matches title and author without returning another user's books.
 - Empty results and clearing the query remain usable on mobile.
+- Sort by recent, title, author, last-read, and progress is stable and owner-scoped.
+- Sort choice persists locally and remains usable at narrow mobile widths.
 - Email identity badge remains readable without overlap at 320px and 360px.
+
+## Covers
+
+- Migration queues existing bookshelf books; new books enter the same persisted
+  reconciliation flow.
+- EPUB2 and EPUB3 declared covers extract and normalize; undeclared decorative
+  images, SVG payloads, oversized images, and unsafe archive paths are rejected.
+- Disabling external catalog searches does not suppress local EPUB/audio
+  artwork extraction or an explicitly enabled local SVG fallback.
+- Attached audio artwork is extracted only from ffprobe streams marked
+  `attached_pic`; arbitrary video frames are not used as jackets.
+- Open Library matches are title/author scored; only exact title and a
+  trustworthy author match can auto-select. Uncertain matches need owner review.
+- Equivalent normalized title/author queries share a hashed cache across users.
+  No-match retries use next-day, weekly, and monthly delays; provider failures
+  use separate exponential backoff.
+- Catalog lookup sends only title/author; the background worker uses a global
+  request gap, and cover images are lazy-loaded from the approved provider.
+- Catalog candidates do not replace an AI/local cover; owner choice and
+  “keep current” lookup pause are enforced.
+- Cover image endpoints and cover choices are owner-scoped. Cover tasks never
+  alter book readiness or transcription jobs.
+- Generated cover recipes accept only a fixed theme and validated colors;
+  Readalong renders escaped SVG locally and rejects model-authored markup.
+- Reflection model discovery caches a sanitized vision-capable list and serves
+  stale results if discovery fails; listing models does not invoke one.
+- Responses and Chat Completions health checks use the selected API style,
+  send a tiny request, report quota/auth/endpoint failures, and are throttled.
+
+## Admin book clone/transfer
+
+- Non-admins cannot list other users' books or queue/inspect copy operations.
+- Only a completed idle book with saved audio and transcript is eligible;
+  active jobs, missing files, suspended recipients, and same-owner operations
+  are rejected.
+- Clone gets a fresh book ID, independent files, fresh chapter IDs, no old
+  runnable jobs, and no personal reading progress or Groq call.
+- Transfer updates owner paths and all historical job owners, removes old
+  progress, and revokes former-owner retry, reader, audio, and cover access.
+- Former owners cannot recreate reading progress or retry a moved book.
+- Copy rejects symlinks and trees larger than the configured hard limit;
+  failures leave the source available.
+- Interrupted operations recover across staging, file publication, and DB
+  commit boundaries; staging markers cannot delete another operation's files.
+- Admin operation results contain no filesystem paths, signed URLs, or book
+  contents.
 
 ## Auth
 

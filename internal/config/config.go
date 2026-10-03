@@ -24,6 +24,7 @@ type Config struct {
 	GroqLanguage         string
 	GroqChunkSeconds     int
 	GroqOverlapSeconds   int
+	OpenLibraryContact   string
 	MaxUploadBytes       int64
 	FFmpegBin            string
 	FFprobeBin           string
@@ -49,6 +50,7 @@ func Load() Config {
 		GroqLanguage:         env("GROQ_LANGUAGE", "en"),
 		GroqChunkSeconds:     envInt("GROQ_CHUNK_SECONDS", 480),
 		GroqOverlapSeconds:   envInt("GROQ_CHUNK_OVERLAP_SECONDS", 2),
+		OpenLibraryContact:   strings.TrimSpace(os.Getenv("OPEN_LIBRARY_CONTACT")),
 		MaxUploadBytes:       envInt64("MAX_UPLOAD_BYTES", 2<<30),
 		FFmpegBin:            env("FFMPEG_BIN", "ffmpeg"),
 		FFprobeBin:           env("FFPROBE_BIN", "ffprobe"),

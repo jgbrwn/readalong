@@ -71,18 +71,46 @@ Composite primary key `(user_id, book_id)`.
 - appearance JSON
 - `updated_at`
 
+### book_cover_state
+
+One owner-book row tracks the selected cover and any review candidate:
+
+- selected/candidate artifact paths or catalog URLs and provider provenance;
+- state (`pending`, `checking`, `missing`, `selected`, or `review`);
+- last/next check, negative-result count, provider-failure count, lookup pause,
+  and an expiring lease for the cover worker.
+
+Existing books are backfilled on migration; new imports get a pending row.
+Generated/EPUB cover files live under the book's owner-scoped directory.
+
+### cover_lookup_cache
+
+Shared, provider-facing lookup cache keyed by a hash of normalized title and
+author. It stores the candidate/no-match result, check time, and next permitted
+lookup. This deduplicates repeated searches across books and users without
+storing another plaintext copy of their queries.
+
+### app_settings and admin_book_operations
+
+`app_settings` stores the sanitized managed-model inventory and admin-selected
+cover settings. `admin_book_operations` is a separate durable queue/audit
+record for admin-initiated clone/transfer operations; it is intentionally not
+stored in the transcription `jobs` queue.
+
 ## API surface
 
 All `/api/*` routes require exe.dev identity except `/api/health`.
 
 ```text
 GET    /api/me
-GET    /api/books?q=title-or-author
+GET    /api/books?q=title-or-author&sort=recent|title|author|lastread|progress
 POST   /api/books                  multipart import
 GET    /api/books/:id
 DELETE /api/books/:id
 GET    /api/books/:id/reader       transcript/ebook window; content=transcript|ebook
 GET    /api/books/:id/audio        Range-capable local media response
+GET    /api/books/:id/cover/selected|candidate   owner-checked local cover image
+POST   /api/books/:id/cover-choice
 GET    /api/books/:id/events       SSE processing progress
 PUT    /api/books/:id/progress
 POST   /api/books/:id/retry
@@ -91,11 +119,72 @@ GET    /api/discovery/pairs?q=title
 POST   /api/discovery/pairs/:id/import
 GET    /api/admin/users           admin only
 PUT    /api/admin/users/:user_id  admin only; update active/suspended status
+GET    /api/admin/users/:user_id/books
+POST   /api/admin/book-operations
+GET    /api/admin/book-operations/:operation_id
+GET    /api/admin/cover-ai
+POST   /api/admin/cover-ai/refresh
+PUT    /api/admin/cover-ai
+POST   /api/admin/cover-ai/check
 ```
 
 Mutating API requests require a same-origin `Origin` header. All book-specific
 routes enforce stable-ID ownership, including audio ranges and event streams.
 Filesystem paths and source URLs are never returned to clients.
+
+### GET /api/books
+
+`sort` is an allowlisted per-request value. `recent` is the default; `title`,
+`author`, `lastread`, and `progress` are stable owner-scoped sorts.
+
+### Cover discovery and display
+
+EPUB-declared raster cover art and supported embedded audiobook artwork are
+normalized locally first. If neither exists, the persistent cover worker
+searches Open Library using only the book title and author. It shares a hashed
+query cache across books/users, sends no user ID/email/audio/EPUB, and limits
+requests to one per second. Catalog artwork is lazy-loaded directly from the
+provider; Readalong does not crawl or bulk-download cover images.
+
+Negative searches retry after 24 hours, then 7 days, then monthly. Provider
+failures use separate exponential backoff. High-confidence catalog matches can
+be selected when no cover exists; uncertain results are review candidates. A
+candidate never silently replaces a generated cover.
+
+`POST /api/books/:id/cover-choice` accepts `{"action":"use_candidate"}` or
+`{"action":"keep_current"}`. Choosing the generated/current cover pauses
+automatic catalog lookup; choosing a catalog candidate also pauses further
+automatic checks.
+
+Admin cover settings discover/caches managed LLM models through Reflection.
+The inventory distinguishes image-input `vision` from advertised image
+output. The current vector-cover renderer asks the selected model for a small
+structured art direction and renders the SVG locally; it does not treat a
+vision model as a raster image generator. The model check sends a small,
+potentially billable inference request through that model's configured
+Responses or Chat Completions API. `GET` serves the six-hour cached inventory;
+`POST /api/admin/cover-ai/refresh` refreshes it. `PUT` saves the global catalog
+lookup switch, description-sharing preference, model ID, API style, and
+optional generation switch. The health check is explicit and rate-limited per
+model; model listing itself never runs inference. A check may consume a small
+amount of the selected model's provider quota.
+
+### Admin book operations
+
+`POST /api/admin/book-operations` accepts a `book_id`, `source_user_id`,
+`target_user_id`, and `mode` (`clone` or `transfer`). Only an idle book with a
+completed initial ingestion, saved audio, and transcript is eligible. The
+operation is asynchronous and reports byte progress via
+`GET /api/admin/book-operations/:operation_id`.
+
+Clones use a fresh book ID and independent file copies; transfers preserve the
+book ID but move the owner and owner-scoped files. Both reset personal reading
+progress, omit old runnable jobs, preserve the completed reader artifacts, and
+reject symlinks or books larger than 8 GiB. A clone receives a new completed
+book marker so it remains eligible for a later copy, without replaying
+transcription. The target must be an active user. Transfer clears the stored
+source URL and removes the old files only after the new ownership/artifact
+pointers commit.
 
 ### POST /api/books/:id/retry
 

@@ -17,36 +17,48 @@ var (
 	ErrBookNotFound            = errors.New("book not found")
 	ErrRetranscriptionNotReady = errors.New("book is not ready for re-transcription")
 	ErrBookJobInProgress       = errors.New("book already has a job in progress")
+	ErrBookOperationInProgress = errors.New("book is being copied or transferred")
+	ErrBookCoverInProgress     = errors.New("book cover is being updated")
+	ErrBookDeleteInProgress    = errors.New("book is being deleted")
 )
 
 type Book struct {
-	ID                string   `json:"id"`
-	Title             string   `json:"title"`
-	Author            string   `json:"author"`
-	SourceKind        string   `json:"source_kind"`
-	Mode              string   `json:"mode"`
-	GutenbergID       string   `json:"gutenberg_id,omitempty"`
-	EbookSourceURL    string   `json:"ebook_source_url,omitempty"`
-	AlignmentQuality  *float64 `json:"alignment_quality,omitempty"`
-	Status            string   `json:"status"`
-	JobStatus         string   `json:"job_status,omitempty"`
-	DurationMS        int64    `json:"duration_ms"`
-	Stage             string   `json:"stage,omitempty"`
-	Progress          float64  `json:"progress,omitempty"`
-	Error             string   `json:"error,omitempty"`
-	PositionMS        int64    `json:"position_ms,omitempty"`
-	PlaybackRate      float64  `json:"playback_rate,omitempty"`
-	SyncOffsetMS      int64    `json:"sync_offset_ms,omitempty"`
-	AppearanceJSON    string   `json:"appearance_json,omitempty"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
-	OwnerUserID       string   `json:"-"`
-	SourceURL         string   `json:"-"`
-	AudioRelPath      string   `json:"-"`
-	EpubRelPath       string   `json:"-"`
-	EbookJSONRelPath  string   `json:"-"`
-	AlignmentRelPath  string   `json:"-"`
-	TranscriptRelPath string   `json:"-"`
+	ID                     string   `json:"id"`
+	Title                  string   `json:"title"`
+	Author                 string   `json:"author"`
+	SourceKind             string   `json:"source_kind"`
+	Mode                   string   `json:"mode"`
+	GutenbergID            string   `json:"gutenberg_id,omitempty"`
+	EbookSourceURL         string   `json:"ebook_source_url,omitempty"`
+	AlignmentQuality       *float64 `json:"alignment_quality,omitempty"`
+	Status                 string   `json:"status"`
+	JobStatus              string   `json:"job_status,omitempty"`
+	DurationMS             int64    `json:"duration_ms"`
+	Stage                  string   `json:"stage,omitempty"`
+	Progress               float64  `json:"progress,omitempty"`
+	Error                  string   `json:"error,omitempty"`
+	PositionMS             int64    `json:"position_ms,omitempty"`
+	PlaybackRate           float64  `json:"playback_rate,omitempty"`
+	SyncOffsetMS           int64    `json:"sync_offset_ms,omitempty"`
+	AppearanceJSON         string   `json:"appearance_json,omitempty"`
+	CoverStatus            string   `json:"cover_status,omitempty"`
+	CoverKind              string   `json:"cover_kind,omitempty"`
+	CoverProvider          string   `json:"cover_provider,omitempty"`
+	CoverURL               string   `json:"cover_url,omitempty"`
+	CoverCandidateURL      string   `json:"cover_candidate_url,omitempty"`
+	CoverCandidateProvider string   `json:"cover_candidate_provider,omitempty"`
+	CoverCandidateYear     int      `json:"cover_candidate_year,omitempty"`
+	CoverReviewNeeded      bool     `json:"cover_review_needed,omitempty"`
+	CoverYear              int      `json:"cover_year,omitempty"`
+	CreatedAt              string   `json:"created_at"`
+	UpdatedAt              string   `json:"updated_at"`
+	OwnerUserID            string   `json:"-"`
+	SourceURL              string   `json:"-"`
+	AudioRelPath           string   `json:"-"`
+	EpubRelPath            string   `json:"-"`
+	EbookJSONRelPath       string   `json:"-"`
+	AlignmentRelPath       string   `json:"-"`
+	TranscriptRelPath      string   `json:"-"`
 }
 
 type NewBook struct {
@@ -153,9 +165,54 @@ CREATE TABLE IF NOT EXISTS reading_progress (
  position_ms INTEGER NOT NULL DEFAULT 0, playback_rate REAL NOT NULL DEFAULT 1.0, sync_offset_ms INTEGER NOT NULL DEFAULT 0,
  appearance_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
  PRIMARY KEY(user_id, book_id)
-);`
+);
+CREATE TABLE IF NOT EXISTS book_cover_state (
+ book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+ status TEXT NOT NULL DEFAULT 'pending',
+ selected_kind TEXT NOT NULL DEFAULT '', selected_relpath TEXT, selected_url TEXT,
+ selected_provider TEXT, selected_year INTEGER NOT NULL DEFAULT 0,
+ candidate_kind TEXT NOT NULL DEFAULT '', candidate_relpath TEXT, candidate_url TEXT,
+	candidate_provider TEXT, candidate_year INTEGER NOT NULL DEFAULT 0,
+	last_checked_at TEXT, next_check_at TEXT, no_match_count INTEGER NOT NULL DEFAULT 0,
+	failure_count INTEGER NOT NULL DEFAULT 0, lookup_paused INTEGER NOT NULL DEFAULT 0,
+	local_scan_needed INTEGER NOT NULL DEFAULT 1, deleting INTEGER NOT NULL DEFAULT 0,
+	lease_until TEXT, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS book_cover_due ON book_cover_state(lookup_paused,next_check_at,lease_until);
+CREATE TABLE IF NOT EXISTS cover_lookup_cache (
+ cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL DEFAULT '', found INTEGER NOT NULL DEFAULT 0,
+ no_match_count INTEGER NOT NULL DEFAULT 0, checked_at TEXT NOT NULL, next_check_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cover_provider_usage (
+ provider TEXT NOT NULL, usage_day TEXT NOT NULL, request_count INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(provider,usage_day)
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+ key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_book_operations (
+ id TEXT PRIMARY KEY, actor_user_id TEXT NOT NULL, mode TEXT NOT NULL, book_id TEXT NOT NULL,
+ source_owner_user_id TEXT NOT NULL, target_owner_user_id TEXT NOT NULL, target_book_id TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT 'queued',
+ copied_bytes INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0,
+ error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS admin_book_operations_active
+ ON admin_book_operations(book_id) WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS admin_book_operations_queue ON admin_book_operations(status,created_at);`
 	_, err := d.Exec(schema)
 	if err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "deleting", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "local_scan_needed", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := d.Exec(`INSERT OR IGNORE INTO book_cover_state(book_id,status,next_check_at,updated_at)
+		SELECT id,'pending',?,? FROM books`, now, now); err != nil {
 		return err
 	}
 	// Upgrade databases created by earlier scaffold revisions.
@@ -180,6 +237,32 @@ CREATE TABLE IF NOT EXISTS reading_progress (
 		}
 	}
 	return nil
+}
+
+type Setting struct {
+	Value     string
+	UpdatedAt string
+}
+
+func (d *DB) AppSetting(ctx context.Context, key string) (Setting, bool, error) {
+	var setting Setting
+	err := d.QueryRowContext(ctx, `SELECT value,updated_at FROM app_settings WHERE key=?`, key).
+		Scan(&setting.Value, &setting.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return Setting{}, false, nil
+	}
+	return setting, err == nil, err
+}
+
+func (d *DB) SetAppSetting(ctx context.Context, key, value string) error {
+	if key == "" || len(key) > 100 || len(value) > 2<<20 {
+		return fmt.Errorf("invalid application setting")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := d.ExecContext(ctx, `INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		key, value, now)
+	return err
 }
 
 func (d *DB) ensureColumn(table, name, definition string) error {
@@ -258,9 +341,26 @@ func (d *DB) BooksForUser(ctx context.Context, uid string) ([]Book, error) {
 }
 
 func (d *DB) SearchBooksForUser(ctx context.Context, uid, query string) ([]Book, error) {
+	return d.SearchBooksForUserSorted(ctx, uid, query, "recent")
+}
+
+func (d *DB) SearchBooksForUserSorted(ctx context.Context, uid, query, sortBy string) ([]Book, error) {
+	orderBy, ok := map[string]string{
+		"recent":   "b.created_at DESC,b.id",
+		"title":    "lower(b.title),lower(b.author),b.id",
+		"author":   "CASE WHEN trim(b.author)='' THEN 1 ELSE 0 END,lower(b.author),lower(b.title),b.id",
+		"lastread": "CASE WHEN p.updated_at IS NULL THEN 1 ELSE 0 END,p.updated_at DESC,b.created_at DESC,b.id",
+		"progress": "CASE WHEN b.duration_ms>0 THEN min(1.0,max(0.0,COALESCE(p.position_ms,0)*1.0/b.duration_ms)) ELSE 0 END DESC,b.created_at DESC,b.id",
+	}[sortBy]
+	if !ok {
+		orderBy = "b.created_at DESC,b.id"
+	}
 	rows, err := d.QueryContext(ctx, `SELECT `+bookSelectColumns+`
 		WHERE b.owner_user_id=? AND (?='' OR instr(lower(b.title),lower(?))>0 OR instr(lower(b.author),lower(?))>0)
-		ORDER BY b.created_at DESC`, uid, query, query, query)
+			AND NOT EXISTS(SELECT 1 FROM admin_book_operations op WHERE op.target_book_id=b.id
+				AND op.status IN ('queued','running')
+				AND (op.mode='clone' OR b.owner_user_id=op.target_owner_user_id))
+		ORDER BY `+orderBy, uid, query, query, query)
 	if err != nil {
 		return nil, err
 	}
@@ -283,10 +383,18 @@ const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b
 	b.created_at,b.updated_at,b.owner_user_id,COALESCE(b.source_url,''),COALESCE(b.audio_relpath,''),
 	COALESCE(b.epub_relpath,''),COALESCE(b.ebook_json_relpath,''),COALESCE(b.transcript_relpath,''),
 	COALESCE(b.alignment_relpath,''),b.alignment_quality,COALESCE(b.gutenberg_id,''),
-	COALESCE(b.ebook_source_url,'')
+	COALESCE(b.ebook_source_url,''),COALESCE(cs.status,'pending'),COALESCE(cs.selected_kind,''),
+	CASE WHEN COALESCE(cs.selected_url,'')<>'' THEN cs.selected_url
+		WHEN COALESCE(cs.selected_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/selected' ELSE '' END,
+	CASE WHEN COALESCE(cs.candidate_url,'')<>'' THEN cs.candidate_url
+		WHEN COALESCE(cs.candidate_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/candidate' ELSE '' END,
+	CASE WHEN COALESCE(cs.candidate_url,'')<>'' OR COALESCE(cs.candidate_relpath,'')<>'' THEN 1 ELSE 0 END,
+	COALESCE(cs.selected_year,0),COALESCE(cs.selected_provider,''),COALESCE(cs.candidate_provider,''),
+	COALESCE(cs.candidate_year,0)
 	FROM books b
 	LEFT JOIN jobs j ON j.id=(SELECT j2.id FROM jobs j2 WHERE j2.book_id=b.id ORDER BY j2.created_at DESC,j2.rowid DESC LIMIT 1)
-	LEFT JOIN reading_progress p ON p.book_id=b.id AND p.user_id=b.owner_user_id`
+	LEFT JOIN reading_progress p ON p.book_id=b.id AND p.user_id=b.owner_user_id
+	LEFT JOIN book_cover_state cs ON cs.book_id=b.id`
 
 type rowScanner interface {
 	Scan(...any) error
@@ -299,7 +407,9 @@ func scanBook(row rowScanner) (Book, error) {
 		&b.JobStatus, &b.Stage, &b.Progress, &b.Error, &b.PositionMS, &b.PlaybackRate, &b.SyncOffsetMS,
 		&b.AppearanceJSON, &b.CreatedAt, &b.UpdatedAt, &b.OwnerUserID, &b.SourceURL, &b.AudioRelPath,
 		&b.EpubRelPath, &b.EbookJSONRelPath, &b.TranscriptRelPath, &b.AlignmentRelPath,
-		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL)
+		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL, &b.CoverStatus, &b.CoverKind,
+		&b.CoverURL, &b.CoverCandidateURL, &b.CoverReviewNeeded, &b.CoverYear,
+		&b.CoverProvider, &b.CoverCandidateProvider, &b.CoverCandidateYear)
 	if alignmentQuality.Valid {
 		b.AlignmentQuality = &alignmentQuality.Float64
 	}
@@ -307,9 +417,13 @@ func scanBook(row rowScanner) (Book, error) {
 }
 
 func (d *DB) BookForUser(ctx context.Context, uid, bid string) (Book, error) {
-	b, err := scanBook(d.QueryRowContext(ctx, `SELECT `+bookSelectColumns+` WHERE b.owner_user_id=? AND b.id=?`, uid, bid))
+	b, err := scanBook(d.QueryRowContext(ctx, `SELECT `+bookSelectColumns+`
+		WHERE b.owner_user_id=? AND b.id=?
+		AND NOT EXISTS(SELECT 1 FROM admin_book_operations op WHERE op.target_book_id=b.id
+			AND op.status IN ('queued','running')
+			AND (op.mode='clone' OR b.owner_user_id=op.target_owner_user_id))`, uid, bid))
 	if err != nil {
-		return Book{}, fmt.Errorf("book not found")
+		return Book{}, ErrBookNotFound
 	}
 	return b, nil
 }
@@ -349,6 +463,11 @@ func (d *DB) CreateBookAndJob(ctx context.Context, in NewBook) error {
 	if err != nil {
 		return err
 	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO book_cover_state(book_id,status,next_check_at,updated_at)
+		VALUES(?,'pending',?,?)`, in.ID, now, now)
+	if err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -363,10 +482,13 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 			SELECT 1 FROM books b
 			WHERE b.id=? AND b.owner_user_id=? AND b.status='ready'
 				AND COALESCE(b.audio_relpath,'')<>'' AND COALESCE(b.transcript_relpath,'')<>''
+				AND NOT EXISTS(SELECT 1 FROM book_cover_state c WHERE c.book_id=b.id AND c.deleting=1)
 		) AND NOT EXISTS (
 			SELECT 1 FROM jobs j
 			WHERE j.book_id=? AND j.owner_user_id=? AND j.status IN ('queued','running')
-		)`, jobID, ownerID, bookID, now, now, bookID, ownerID, bookID, ownerID)
+		) AND NOT EXISTS (
+			SELECT 1 FROM admin_book_operations op WHERE op.book_id=? AND op.status IN ('queued','running')
+		)`, jobID, ownerID, bookID, now, now, bookID, ownerID, bookID, ownerID, bookID)
 	if err != nil {
 		return err
 	}
@@ -377,13 +499,15 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 	if inserted == 1 {
 		return nil
 	}
-	var exists, ready, active int
+	var exists, ready, active, operationActive, deleting int
 	err = d.QueryRowContext(ctx, `SELECT
 		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?),
 		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=? AND status='ready'
 			AND COALESCE(audio_relpath,'')<>'' AND COALESCE(transcript_relpath,'')<>''),
-		EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND owner_user_id=? AND status IN ('queued','running'))`,
-		bookID, ownerID, bookID, ownerID, bookID, ownerID).Scan(&exists, &ready, &active)
+		EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND owner_user_id=? AND status IN ('queued','running')),
+		EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running')),
+		EXISTS(SELECT 1 FROM book_cover_state WHERE book_id=? AND deleting=1)`,
+		bookID, ownerID, bookID, ownerID, bookID, ownerID, bookID, bookID).Scan(&exists, &ready, &active, &operationActive, &deleting)
 	if err != nil {
 		return err
 	}
@@ -392,6 +516,10 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 		return ErrBookNotFound
 	case active != 0:
 		return ErrBookJobInProgress
+	case operationActive != 0:
+		return ErrBookOperationInProgress
+	case deleting != 0:
+		return ErrBookDeleteInProgress
 	case ready == 0:
 		return ErrRetranscriptionNotReady
 	default:
@@ -409,12 +537,18 @@ func nullableString(s string) any {
 func (d *DB) SetEbookJSONPath(ctx context.Context, id, relPath string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.ExecContext(ctx, `UPDATE books SET ebook_json_relpath=?,updated_at=? WHERE id=?`, relPath, now, id)
+	if err == nil {
+		err = d.QueueLocalCoverScan(ctx, id)
+	}
 	return err
 }
 
 func (d *DB) SetEpubPath(ctx context.Context, id, relPath string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.ExecContext(ctx, `UPDATE books SET epub_relpath=?,updated_at=? WHERE id=?`, relPath, now, id)
+	if err == nil {
+		err = d.QueueLocalCoverScan(ctx, id)
+	}
 	return err
 }
 
@@ -431,6 +565,9 @@ func (d *DB) SetBookMedia(ctx context.Context, id, title, author, audioRelPath s
 		title=CASE WHEN title='' OR title='Untitled' THEN ? ELSE title END,
 		author=?,audio_relpath=?,duration_ms=?,updated_at=? WHERE id=?`,
 		title, author, audioRelPath, durationMS, now, id)
+	if err == nil {
+		err = d.QueueLocalCoverScan(ctx, id)
+	}
 	return err
 }
 
@@ -472,6 +609,9 @@ func (d *DB) SetBookAudioPath(ctx context.Context, id, audioRelPath string) erro
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.ExecContext(ctx, `UPDATE books SET audio_relpath=?,updated_at=? WHERE id=?`,
 		audioRelPath, now, id)
+	if err == nil {
+		err = d.QueueLocalCoverScan(ctx, id)
+	}
 	return err
 }
 
@@ -576,6 +716,7 @@ func (d *DB) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	err = tx.QueryRowContext(ctx, `SELECT id,owner_user_id,book_id,kind,status,stage,progress,attempt,
 		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs
 		WHERE status='queued' AND (not_before_at IS NULL OR not_before_at<=?)
+			AND NOT EXISTS(SELECT 1 FROM book_cover_state c WHERE c.book_id=jobs.book_id AND c.deleting=1)
 		ORDER BY created_at,rowid LIMIT 1`, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
 		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
 	if err == sql.ErrNoRows {
@@ -690,12 +831,17 @@ func (d *DB) RetryJob(ctx context.Context, ownerID, bookID string) error {
 		not_before_at=NULL,updated_at=? WHERE id=(
 			SELECT j.id FROM jobs j
 			WHERE j.book_id=? AND j.owner_user_id=? AND j.kind='book' AND j.status='error'
+				AND EXISTS(SELECT 1 FROM books b WHERE b.id=j.book_id AND b.owner_user_id=?)
 				AND j.id=(SELECT latest.id FROM jobs latest WHERE latest.book_id=j.book_id
 					ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1)
 				AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.book_id=j.book_id
 					AND active.status IN ('queued','running'))
+				AND NOT EXISTS (SELECT 1 FROM admin_book_operations op WHERE op.book_id=j.book_id
+					AND op.status IN ('queued','running'))
+				AND NOT EXISTS (SELECT 1 FROM book_cover_state c WHERE c.book_id=j.book_id AND c.lease_until>?)
+				AND NOT EXISTS (SELECT 1 FROM book_cover_state c WHERE c.book_id=j.book_id AND c.deleting=1)
 			LIMIT 1
-		)`, now, bookID, ownerID)
+		)`, now, bookID, ownerID, ownerID, now)
 	if err != nil {
 		return err
 	}
@@ -704,6 +850,18 @@ func (d *DB) RetryJob(ctx context.Context, ownerID, bookID string) error {
 		return err
 	}
 	if n == 0 {
+		if err := d.AssertBookOwner(ctx, ownerID, bookID); err != nil {
+			return ErrBookNotFound
+		}
+		if active, err := d.BookHasAdminOperation(ctx, bookID); err == nil && active {
+			return ErrBookOperationInProgress
+		}
+		if active, err := d.BookCoverIsRunning(ctx, bookID, now); err == nil && active {
+			return ErrBookCoverInProgress
+		}
+		if deleting, err := d.BookIsDeleting(ctx, ownerID, bookID); err == nil && deleting {
+			return ErrBookDeleteInProgress
+		}
 		return fmt.Errorf("retry not available")
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE books SET status=CASE WHEN transcript_relpath IS NULL OR transcript_relpath=''
@@ -718,7 +876,13 @@ func (d *DB) RetryJob(ctx context.Context, ownerID, bookID string) error {
 }
 
 func (d *DB) DeleteBook(ctx context.Context, ownerID, bookID string) error {
-	res, err := d.ExecContext(ctx, `DELETE FROM books WHERE id=? AND owner_user_id=?`, bookID, ownerID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := d.ExecContext(ctx, `DELETE FROM books WHERE id=? AND owner_user_id=?
+		AND NOT EXISTS(SELECT 1 FROM admin_book_operations op WHERE op.book_id=books.id
+			AND op.status IN ('queued','running'))
+		AND EXISTS(SELECT 1 FROM book_cover_state c WHERE c.book_id=books.id AND c.deleting=1)
+		AND NOT EXISTS(SELECT 1 FROM book_cover_state c WHERE c.book_id=books.id AND c.lease_until>?)`,
+		bookID, ownerID, now)
 	if err != nil {
 		return err
 	}
@@ -727,6 +891,12 @@ func (d *DB) DeleteBook(ctx context.Context, ownerID, bookID string) error {
 		return err
 	}
 	if n == 0 {
+		if active, err := d.BookHasAdminOperation(ctx, bookID); err == nil && active {
+			return ErrBookOperationInProgress
+		}
+		if active, err := d.BookCoverIsRunning(ctx, bookID, now); err == nil && active {
+			return ErrBookCoverInProgress
+		}
 		return fmt.Errorf("book not found")
 	}
 	return nil
@@ -734,13 +904,32 @@ func (d *DB) DeleteBook(ctx context.Context, ownerID, bookID string) error {
 
 func (d *DB) SaveProgress(ctx context.Context, userID, bookID string, positionMS int64, rate float64, offsetMS int64, appearance string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.ExecContext(ctx, `INSERT INTO reading_progress
+	result, err := d.ExecContext(ctx, `INSERT INTO reading_progress
 		(user_id,book_id,position_ms,playback_rate,sync_offset_ms,appearance_json,updated_at)
-		VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+		SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)
+			AND NOT EXISTS(SELECT 1 FROM admin_book_operations op WHERE op.target_book_id=?
+				AND op.target_owner_user_id=? AND op.status IN ('queued','running'))
+		ON CONFLICT(user_id,book_id) DO UPDATE SET
 		position_ms=excluded.position_ms,playback_rate=excluded.playback_rate,
 		sync_offset_ms=excluded.sync_offset_ms,appearance_json=excluded.appearance_json,updated_at=excluded.updated_at`,
-		userID, bookID, positionMS, rate, offsetMS, appearance, now)
-	return err
+		userID, bookID, positionMS, rate, offsetMS, appearance, now, bookID, userID, bookID, userID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		var operationActive bool
+		if err := d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM admin_book_operations
+			WHERE target_book_id=? AND target_owner_user_id=? AND status IN ('queued','running'))`,
+			bookID, userID).Scan(&operationActive); err == nil && operationActive {
+			return ErrBookOperationInProgress
+		}
+		return ErrBookNotFound
+	}
+	return nil
 }
 
 func (d *DB) JobStatus(ctx context.Context, bookID string) (Job, error) {
@@ -779,6 +968,15 @@ func (d *DB) Users(ctx context.Context) ([]User, error) {
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+func (d *DB) UserByID(ctx context.Context, id string) (User, error) {
+	var user User
+	err := d.QueryRowContext(ctx, `SELECT id,email,role,status,created_at,last_seen_at,
+		(SELECT COUNT(*) FROM books WHERE owner_user_id=users.id)
+		FROM users WHERE id=?`, id).Scan(&user.ID, &user.Email, &user.Role, &user.Status,
+		&user.CreatedAt, &user.LastSeenAt, &user.BookCount)
+	return user, err
 }
 
 func (d *DB) SetUserStatus(ctx context.Context, id, status string) error {

@@ -17,6 +17,7 @@ import (
 	"github.com/jgbrwn/readalong/internal/align"
 	"github.com/jgbrwn/readalong/internal/catalog"
 	"github.com/jgbrwn/readalong/internal/config"
+	"github.com/jgbrwn/readalong/internal/coverai"
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/pipeline"
 	"github.com/jgbrwn/readalong/internal/transcript"
@@ -30,6 +31,22 @@ func testServer(t *testing.T, cfg config.Config) (*db.DB, http.Handler) {
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	return d, New(cfg, d)
+}
+
+type fakeCoverModelRegistry struct {
+	models  []coverai.Model
+	check   coverai.CheckResult
+	lastID  string
+	lastAPI coverai.APIStyle
+}
+
+func (f *fakeCoverModelRegistry) Discover(context.Context) ([]coverai.Model, error) {
+	return f.models, nil
+}
+
+func (f *fakeCoverModelRegistry) CheckModel(_ context.Context, id string, api coverai.APIStyle) (coverai.CheckResult, error) {
+	f.lastID, f.lastAPI = id, api
+	return f.check, nil
 }
 
 func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
@@ -77,6 +94,189 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	outsider := request(handler, http.MethodGet, "/api/books", "other-user", "other@example.org", "")
 	if outsider.Code != http.StatusOK || strings.Contains(outsider.Body.String(), book.ID) {
 		t.Fatalf("catalog book crossed owner boundary: %d %s", outsider.Code, outsider.Body)
+	}
+}
+
+func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
+	registry := &fakeCoverModelRegistry{
+		models: []coverai.Model{{
+			ID: "neuralwatt/qwen-vision", Name: "Qwen vision", Provider: "Neuralwatt",
+			APIStyle: coverai.APIChat, Vision: true,
+		}},
+		check: coverai.CheckResult{
+			Healthy: true, Message: "Model is responding.", APIStyle: coverai.APIChat, LatencyMS: 15,
+		},
+	}
+	cfg := config.Config{
+		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
+		AdminUserIDs: map[string]bool{"admin-id": true},
+	}
+	d, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	handler := newWithCatalogAndCoverAI(cfg, d, nil, registry)
+
+	denied := request(handler, http.MethodGet, "/api/admin/cover-ai", "reader-id", "reader@example.org", "")
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("non-admin cover settings status = %d", denied.Code)
+	}
+	admin := request(handler, http.MethodGet, "/api/admin/cover-ai", "admin-id", "admin@example.org", "")
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"neuralwatt/qwen-vision"`) {
+		t.Fatalf("admin cover model catalog = %d: %s", admin.Code, admin.Body)
+	}
+
+	saved := request(handler, http.MethodPut, "/api/admin/cover-ai", "admin-id", "admin@example.org",
+		`{"enabled":true,"model_id":"neuralwatt/qwen-vision","api_style":"chat_completions"}`)
+	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"enabled":true`) {
+		t.Fatalf("cover settings save = %d: %s", saved.Code, saved.Body)
+	}
+	invalid := request(handler, http.MethodPut, "/api/admin/cover-ai", "admin-id", "admin@example.org",
+		`{"enabled":true,"model_id":"unlisted/model","api_style":"responses"}`)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("unlisted model accepted: %d %s", invalid.Code, invalid.Body)
+	}
+
+	checked := request(handler, http.MethodPost, "/api/admin/cover-ai/check", "admin-id", "admin@example.org",
+		`{"model_id":"neuralwatt/qwen-vision","api_style":"chat_completions"}`)
+	if checked.Code != http.StatusOK || !strings.Contains(checked.Body.String(), `"healthy":true`) {
+		t.Fatalf("model health check = %d: %s", checked.Code, checked.Body)
+	}
+	if registry.lastID != "neuralwatt/qwen-vision" || registry.lastAPI != coverai.APIChat {
+		t.Fatalf("wrong model check route: id=%q api=%q", registry.lastID, registry.lastAPI)
+	}
+}
+
+func TestAdminBookOperationEndpointsAreAdminOnlyAndQueueCompleteBooks(t *testing.T) {
+	cfg := config.Config{
+		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
+		AdminUserIDs: map[string]bool{"admin-id": true},
+	}
+	d, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	handler := NewWithCatalog(cfg, d, nil)
+	for _, user := range []struct{ id, email string }{
+		{"admin-id", "admin@example.org"}, {"source-user", "source@example.org"},
+		{"target-user", "target@example.org"},
+	} {
+		_ = request(handler, http.MethodGet, "/api/me", user.id, user.email, "")
+	}
+	if err := d.CreateBookAndJob(context.Background(), db.NewBook{
+		ID: "admin-copy-book", JobID: "admin-copy-job", OwnerUserID: "source-user",
+		Title: "Copy Ready Book", Author: "A. Writer", SourceKind: "upload",
+		AudioRelPath: "books/source-user/admin-copy-book/playback.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(), `UPDATE books SET status='ready',
+		transcript_relpath='books/source-user/admin-copy-book/transcript.json.gz'
+		WHERE id='admin-copy-book'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(), `UPDATE jobs SET status='completed',stage='ready',progress=1
+		WHERE id='admin-copy-job'`); err != nil {
+		t.Fatal(err)
+	}
+
+	deniedBooks := request(handler, http.MethodGet, "/api/admin/users/source-user/books",
+		"source-user", "source@example.org", "")
+	if deniedBooks.Code != http.StatusNotFound {
+		t.Fatalf("non-admin user books status = %d", deniedBooks.Code)
+	}
+	books := request(handler, http.MethodGet, "/api/admin/users/source-user/books",
+		"admin-id", "admin@example.org", "")
+	if books.Code != http.StatusOK || !strings.Contains(books.Body.String(), `"Copy Ready Book"`) ||
+		strings.Contains(books.Body.String(), `"audio_relpath"`) {
+		t.Fatalf("admin source-book list = %d: %s", books.Code, books.Body)
+	}
+	body := `{"book_id":"admin-copy-book","source_user_id":"source-user","target_user_id":"target-user","mode":"clone"}`
+	deniedCopy := request(handler, http.MethodPost, "/api/admin/book-operations",
+		"source-user", "source@example.org", body)
+	if deniedCopy.Code != http.StatusNotFound {
+		t.Fatalf("non-admin copy status = %d", deniedCopy.Code)
+	}
+	queued := request(handler, http.MethodPost, "/api/admin/book-operations",
+		"admin-id", "admin@example.org", body)
+	if queued.Code != http.StatusAccepted || !strings.Contains(queued.Body.String(), `"mode":"clone"`) ||
+		!strings.Contains(queued.Body.String(), `"status":"queued"`) {
+		t.Fatalf("admin clone queue = %d: %s", queued.Code, queued.Body)
+	}
+	var response struct {
+		Operation db.AdminBookOperation `json:"operation"`
+	}
+	if err := json.Unmarshal(queued.Body.Bytes(), &response); err != nil || response.Operation.ID == "" {
+		t.Fatalf("queued response=%#v err=%v", response, err)
+	}
+	status := request(handler, http.MethodGet, "/api/admin/book-operations/"+response.Operation.ID,
+		"admin-id", "admin@example.org", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"status":"queued"`) {
+		t.Fatalf("admin operation status = %d: %s", status.Code, status.Body)
+	}
+}
+
+func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound, DataDir: t.TempDir()}
+	d, handler := testServer(t, cfg)
+	_ = request(handler, http.MethodGet, "/api/me", "cover-owner", "owner@example.org", "")
+	_ = request(handler, http.MethodGet, "/api/me", "cover-outsider", "other@example.org", "")
+	if err := d.CreateBookAndJob(context.Background(), db.NewBook{
+		ID: "cover-book", OwnerUserID: "cover-owner", Title: "Cover Book", Author: "A. Author",
+		SourceKind: "upload", AudioRelPath: "books/cover-owner/cover-book/playback.mp3", JobID: "cover-job",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	coverDir := pipeline.BookDirectory(cfg.Normalize().DataDir, "cover-owner", "cover-book")
+	coverPath := filepath.Join(coverDir, "cover", "generated.svg")
+	if err := os.MkdirAll(filepath.Dir(coverPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coverPath, []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cfg.Normalize().DataDir, coverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(), `UPDATE book_cover_state SET status='review',
+		selected_kind='ai_svg',selected_relpath=?,selected_provider='Readalong vector art',
+		candidate_kind='catalog',candidate_url='https://covers.openlibrary.org/b/id/77-M.jpg?default=false',
+		candidate_provider='https://openlibrary.org/works/OL77W',candidate_year=1920
+		WHERE book_id='cover-book'`, relative); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerCover := request(handler, http.MethodGet, "/api/books/cover-book/cover/selected", "cover-owner", "owner@example.org", "")
+	if ownerCover.Code != http.StatusOK || ownerCover.Header().Get("Content-Type") != "image/svg+xml; charset=utf-8" {
+		t.Fatalf("owner cover status=%d type=%q body=%s", ownerCover.Code, ownerCover.Header().Get("Content-Type"), ownerCover.Body)
+	}
+	outsiderCover := request(handler, http.MethodGet, "/api/books/cover-book/cover/selected", "cover-outsider", "other@example.org", "")
+	if outsiderCover.Code != http.StatusNotFound {
+		t.Fatalf("other user cover status=%d", outsiderCover.Code)
+	}
+	books, err := d.BooksForUser(context.Background(), "cover-owner")
+	if err != nil || len(books) != 1 || !books[0].CoverReviewNeeded ||
+		books[0].CoverCandidateYear != 1920 {
+		t.Fatalf("book cover summary=%#v err=%v", books, err)
+	}
+	chosen := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
+		"cover-owner", "owner@example.org", `{"action":"use_candidate"}`)
+	var updated db.Book
+	if err := json.Unmarshal(chosen.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	state, stateErr := d.CoverStateForUser(context.Background(), "cover-owner", "cover-book")
+	if chosen.Code != http.StatusOK || updated.CoverKind != "catalog" || updated.CoverReviewNeeded ||
+		stateErr != nil || state.CandidateURL != "" || !state.LookupPaused {
+		t.Fatalf("choosing candidate = %d: %s", chosen.Code, chosen.Body)
+	}
+	outsiderChoice := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
+		"cover-outsider", "other@example.org", `{"action":"keep_current"}`)
+	if outsiderChoice.Code != http.StatusNotFound {
+		t.Fatalf("other user cover choice status=%d", outsiderChoice.Code)
 	}
 }
 

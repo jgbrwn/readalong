@@ -50,11 +50,46 @@ path has been exercised with a fake Groq endpoint. Remaining validation:
   fallback and untimed ebook-word behavior;
 - validate long books and chapter/foreword differences on mobile and desktop.
 
+## Shelf, covers, and admin tools
+
+Implemented first passes:
+
+- bookshelf sorting by recently added, title, author, recently read, or progress;
+- cover state/backfill for all existing books, EPUB-declared covers, supported
+  embedded audio artwork, Open Library catalog suggestions, shared lookup
+  caching, persisted retry/backoff, and owner-checked local image serving;
+- catalog-cover review that never silently replaces a selected generated
+  cover; choosing to keep the generated cover pauses future automatic checks;
+- optional AI-designed SVG fallback. Reflection discovers the VM's managed
+  vision model list, caches it, and provides a model/API-style selector and
+  small health check. The current model inventory advertises image input, not
+  image output, so the selected LLM returns a bounded design recipe and
+  Readalong renders the SVG locally instead of pretending it can emit a
+  raster image;
+- admin-only asynchronous clone/transfer for complete, idle books. It copies
+  files independently, does not copy reading progress or runnable jobs, and
+  shows progress in the admin panel.
+
+## Phase 3 — library durability
+
+Still incomplete: configure and verify Litestream/R2 database replication,
+automated R2 asset mirroring, backup-health diagnostics, and a real restore
+drill. Cover assets and their database state must be included in the eventual
+asset/database backup.
+
 ## Still remaining
 
 - generic yt-dlp webpage extraction beyond YouTube and direct media URLs;
-- R2 asset mirroring, Litestream credentials, and a verified restore drill;
-- cover extraction, bookmarks, quotes, and offline audio downloads.
+- finish real-edition/long-book EPUB alignment validation noted above;
+- chapter jump/navigation controls (chapter metadata and current chapter
+  display exist, but no chapter picker/next/previous controls);
+- bookmarks and quotes;
+- an explicit source-retention/cleanup policy (temporary processing files are
+  cleaned, but there is no general source-retention policy);
+- offline audio downloads; the service worker currently caches the app shell,
+  not book audio/reader data;
+- optional aligned EPUB/SMIL export, direct-Groq-URL transcription, and
+  precision acoustic forced alignment.
 
 Every installation should verify its own private exe.dev share. Public source
 availability does not imply a public running service.

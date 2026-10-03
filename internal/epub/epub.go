@@ -6,30 +6,41 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf16"
+
+	_ "image/gif"
+	_ "image/png"
 )
 
 const (
 	maxEntries       = 10000
 	maxDocumentBytes = 16 << 20
 	maxArchiveBytes  = 512 << 20
+	maxCoverBytes    = 16 << 20
+	maxCoverPixels   = int64(12_000_000)
 	maxBlocks        = 150000
 	maxWords         = 500000
 )
 
 type Document struct {
-	Version   int       `json:"version"`
-	Title     string    `json:"title"`
-	Author    string    `json:"author"`
-	Language  string    `json:"language"`
-	WordCount int       `json:"word_count"`
-	Chapters  []Chapter `json:"chapters"`
+	Version     int       `json:"version"`
+	Title       string    `json:"title"`
+	Author      string    `json:"author"`
+	Language    string    `json:"language"`
+	Description string    `json:"description,omitempty"`
+	WordCount   int       `json:"word_count"`
+	Chapters    []Chapter `json:"chapters"`
 }
 
 type Chapter struct {
@@ -88,6 +99,11 @@ type manifestItem struct {
 	Properties string `xml:"properties,attr"`
 }
 
+type packageMeta struct {
+	Name    string `xml:"name,attr"`
+	Content string `xml:"content,attr"`
+}
+
 type spineItem struct {
 	IDRef  string `xml:"idref,attr"`
 	Linear string `xml:"linear,attr"`
@@ -95,9 +111,12 @@ type spineItem struct {
 
 type packageDoc struct {
 	Metadata struct {
-		Titles    []string `xml:"title"`
-		Creators  []string `xml:"creator"`
-		Languages []string `xml:"language"`
+		Titles       []string      `xml:"title"`
+		Creators     []string      `xml:"creator"`
+		Languages    []string      `xml:"language"`
+		Descriptions []string      `xml:"description"`
+		Dates        []string      `xml:"date"`
+		Meta         []packageMeta `xml:"meta"`
 	} `xml:"metadata"`
 	Manifest struct {
 		Items []manifestItem `xml:"item"`
@@ -105,6 +124,129 @@ type packageDoc struct {
 	Spine struct {
 		Items []spineItem `xml:"itemref"`
 	} `xml:"spine"`
+}
+
+// ExtractCoverFile reads only the cover explicitly identified by the EPUB
+// package. It re-encodes supported raster images to strip metadata and rejects
+// oversized or suspicious dimensions.
+func ExtractCoverFile(filename string) ([]byte, error) {
+	cover, _, err := ExtractCoverFileWithYear(filename)
+	return cover, err
+}
+
+func ExtractCoverFileWithYear(filename string) ([]byte, int, error) {
+	fail := func(err error) ([]byte, int, error) { return nil, 0, err }
+	zr, err := zip.OpenReader(filename)
+	if err != nil {
+		return fail(fmt.Errorf("invalid EPUB archive"))
+	}
+	defer zr.Close()
+	if len(zr.File) == 0 || len(zr.File) > maxEntries {
+		return fail(fmt.Errorf("EPUB contains too many files"))
+	}
+	files := make(map[string]*zip.File, len(zr.File))
+	var total uint64
+	for _, file := range zr.File {
+		name, err := safeEntryName(file.Name)
+		if err != nil || file.Mode()&os.ModeSymlink != 0 {
+			return fail(fmt.Errorf("EPUB contains an unsafe path"))
+		}
+		if _, exists := files[name]; exists {
+			return fail(fmt.Errorf("EPUB contains duplicate paths"))
+		}
+		if file.UncompressedSize64 > maxArchiveBytes || total > maxArchiveBytes-file.UncompressedSize64 {
+			return fail(fmt.Errorf("EPUB expands beyond the allowed size"))
+		}
+		total += file.UncompressedSize64
+		files[name] = file
+	}
+	containerBytes, err := readZipFile(files["META-INF/container.xml"], 1<<20)
+	if err != nil {
+		return fail(fmt.Errorf("EPUB container metadata is invalid"))
+	}
+	var container containerDoc
+	if err := decodeXML(containerBytes, &container); err != nil || len(container.Rootfiles) == 0 {
+		return fail(fmt.Errorf("EPUB container metadata is invalid"))
+	}
+	opfPath, err := safeEntryName(container.Rootfiles[0].FullPath)
+	if err != nil {
+		return fail(fmt.Errorf("EPUB package path is invalid"))
+	}
+	opfBytes, err := readZipFile(files[opfPath], 4<<20)
+	if err != nil {
+		return fail(fmt.Errorf("EPUB package document is missing"))
+	}
+	var pkg packageDoc
+	if err := decodeXML(opfBytes, &pkg); err != nil {
+		return fail(fmt.Errorf("EPUB package document is invalid"))
+	}
+	coverID := ""
+	for _, meta := range pkg.Metadata.Meta {
+		if strings.EqualFold(strings.TrimSpace(meta.Name), "cover") {
+			coverID = strings.TrimSpace(meta.Content)
+			break
+		}
+	}
+	var coverPath string
+	for _, item := range pkg.Manifest.Items {
+		if hasProperty(item.Properties, "cover-image") || (coverID != "" && item.ID == coverID) {
+			coverPath, err = resolvePackageHref(opfPath, item.Href)
+			if err != nil {
+				return fail(fmt.Errorf("EPUB cover path is invalid"))
+			}
+			break
+		}
+	}
+	if coverPath == "" {
+		return fail(fmt.Errorf("EPUB does not declare a cover image"))
+	}
+	data, err := readZipFile(files[coverPath], maxCoverBytes)
+	if err != nil {
+		return fail(fmt.Errorf("EPUB cover image is missing or too large"))
+	}
+	normalized, err := NormalizeCoverImage(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	return normalized, publicationYear(pkg.Metadata.Dates), nil
+}
+
+var publicationYearPattern = regexp.MustCompile(`(?:^|[^0-9])((?:1[0-9]{3}|20[0-9]{2}))(?:[^0-9]|$)`)
+
+func publicationYear(values []string) int {
+	for _, value := range values {
+		match := publicationYearPattern.FindStringSubmatch(strings.TrimSpace(value))
+		if len(match) == 2 {
+			year, err := strconv.Atoi(match[1])
+			if err == nil && year >= 1000 && year <= 2100 {
+				return year
+			}
+		}
+	}
+	return 0
+}
+
+// NormalizeCoverImage validates a raster book cover, strips its metadata by
+// re-encoding it, and returns a bounded JPEG.
+func NormalizeCoverImage(data []byte) ([]byte, error) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || config.Width < 80 || config.Height < 100 ||
+		int64(config.Width)*int64(config.Height) > maxCoverPixels {
+		return nil, fmt.Errorf("EPUB cover image has invalid dimensions or format")
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("EPUB cover image format is unsupported")
+	}
+	bounds := decoded.Bounds()
+	background := image.NewRGBA(bounds)
+	draw.Draw(background, bounds, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	draw.Draw(background, bounds, decoded, bounds.Min, draw.Over)
+	var output bytes.Buffer
+	if err := jpeg.Encode(&output, background, &jpeg.Options{Quality: 88}); err != nil {
+		return nil, fmt.Errorf("EPUB cover image could not be normalized")
+	}
+	return output.Bytes(), nil
 }
 
 // ParseFile reads the EPUB package and extracts only spine-ordered XHTML text.
@@ -175,6 +317,14 @@ func ParseFile(filename string) (Document, error) {
 	}
 	if len(pkg.Metadata.Languages) > 0 {
 		doc.Language = cleanText(pkg.Metadata.Languages[0])
+	}
+	if len(pkg.Metadata.Descriptions) > 0 {
+		description := cleanText(pkg.Metadata.Descriptions[0])
+		runes := []rune(description)
+		if len(runes) > 1200 {
+			description = string(runes[:1200])
+		}
+		doc.Description = description
 	}
 
 	for _, itemRef := range pkg.Spine.Items {

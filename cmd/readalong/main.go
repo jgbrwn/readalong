@@ -10,7 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jgbrwn/readalong/internal/bookops"
 	"github.com/jgbrwn/readalong/internal/config"
+	"github.com/jgbrwn/readalong/internal/coverai"
+	"github.com/jgbrwn/readalong/internal/covers"
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/httpapp"
 	"github.com/jgbrwn/readalong/internal/pipeline"
@@ -23,13 +26,28 @@ func main() {
 		log.Fatal(err)
 	}
 	defer d.Close()
+	if err := d.ResetInterruptedBookDeletions(context.Background()); err != nil {
+		log.Fatal("could not recover interrupted book deletions")
+	}
 	worker := pipeline.New(cfg, d)
+	bookOperations := bookops.New(cfg, d)
+	coverWorker := covers.New(cfg, d, coverai.NewRegistry())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	workerDone := make(chan struct{})
+	bookOperationsDone := make(chan struct{})
+	coverWorkerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		worker.Run(ctx)
+	}()
+	go func() {
+		defer close(bookOperationsDone)
+		bookOperations.Run(ctx)
+	}()
+	go func() {
+		defer close(coverWorkerDone)
+		coverWorker.Run(ctx)
 	}()
 	srv := &http.Server{
 		Addr: cfg.Addr, Handler: httpapp.New(cfg, d, worker),
@@ -47,4 +65,6 @@ func main() {
 	}
 	stop()
 	<-workerDone
+	<-bookOperationsDone
+	<-coverWorkerDone
 }

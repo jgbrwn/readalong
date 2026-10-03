@@ -15,7 +15,7 @@
     <a class="brand" href="/" aria-label="Readalong bookshelf">readalong<span>·</span></a>
     <div class="topbar-account">
       <div class="top-actions">
-        <button id="adminToggle" class="button button-quiet" hidden>People</button>
+        <button id="adminToggle" class="button button-quiet" hidden>Admin</button>
         <button id="discoverPairs" class="button button-quiet">Find a pair</button>
         <button id="add" class="button">＋ Add a book</button>
       </div>
@@ -39,6 +39,14 @@
         <div class="shelf-tools">
           <label class="shelf-search-label" for="shelfSearch">Search your books</label>
           <input id="shelfSearch" type="search" placeholder="Title or author" autocomplete="off">
+          <label class="shelf-search-label" for="shelfSort">Sort your books</label>
+          <select id="shelfSort" aria-label="Sort books">
+            <option value="recent">Recently added</option>
+            <option value="title">Title A–Z</option>
+            <option value="author">Author A–Z</option>
+            <option value="lastread">Recently read</option>
+            <option value="progress">Most read</option>
+          </select>
           <span id="bookCount" class="muted"></span>
         </div>
       </div>
@@ -50,9 +58,72 @@
     <section class="admin-page">
       <button id="adminBack" class="button button-quiet">← Bookshelf</button>
       <p class="eyebrow">ADMINISTRATION</p>
-      <h1>People</h1>
-      <p class="muted">Manage account access. Bookshelves remain private to their owners, including yours.</p>
-      <div id="adminUsers" class="people-list"></div>
+      <h1>Admin settings</h1>
+      <p class="muted">Manage accounts and shared Readalong behavior.</p>
+      <nav id="adminTabs" class="admin-tabs" aria-label="Administration sections">
+        <button type="button" class="admin-tab is-active" data-admin-tab="people">People</button>
+        <button type="button" class="admin-tab" data-admin-tab="coverAI">Cover artwork</button>
+        <button type="button" class="admin-tab" data-admin-tab="bookTransfer">Books</button>
+      </nav>
+      <section id="adminPeople" class="admin-section">
+        <h2>Accounts</h2>
+        <p class="muted">Manage account access. Regular book/media access stays owner-scoped; cross-account copies use the audited Books tools.</p>
+        <div id="adminUsers" class="people-list"></div>
+      </section>
+      <section id="adminCoverAI" class="admin-section" hidden>
+        <h2>Cover artwork model</h2>
+        <p class="muted">Readalong discovers available models through the VM’s managed LLM integration. “Vision” means image input, not image output. This version asks the selected model for a structured cover design and renders a safe SVG locally. Cover design sends only title, author, short EPUB description metadata (if present), and a verified year—not audio or chapter text.</p>
+        <div class="cover-ai-controls">
+          <label class="admin-checkbox">
+            <input id="enableCoverLookup" type="checkbox">
+            <span>Automatically search public catalogs for covers. Only book title and author are sent; audio and ebook contents are not. Cover images load directly from Open Library when shown.</span>
+          </label>
+          <label for="coverAIModel">Vision-capable design model</label>
+          <select id="coverAIModel" disabled><option value="">Refresh models to choose</option></select>
+          <label for="coverAIAPIStyle">API format</label>
+          <select id="coverAIAPIStyle">
+            <option value="responses">Responses API</option>
+            <option value="chat_completions">Chat Completions API</option>
+          </select>
+          <p class="fine-print">Readalong infers the API format from model metadata/provider where possible. If “Check model” reports an endpoint mismatch, try the other format.</p>
+          <p id="coverAIModelInfo" class="muted"></p>
+          <p class="fine-print">“Check model” sends a tiny request to the selected provider. It can consume a small amount of quota and can reveal rate limits or credit exhaustion.</p>
+          <div class="admin-actions">
+            <button id="refreshCoverModels" class="button button-quiet" type="button">Refresh models</button>
+            <button id="checkCoverModel" class="button button-quiet" type="button" disabled>Check model</button>
+          </div>
+          <label class="admin-checkbox">
+            <input id="enableCoverAI" type="checkbox">
+            <span>Generate a designed vector cover when no catalog cover is found</span>
+          </label>
+          <label class="admin-checkbox">
+            <input id="includeCoverDescription" type="checkbox">
+            <span>Include a short description from an EPUB’s metadata in the cover design request</span>
+          </label>
+          <p id="coverAIStatus" class="form-message" role="status"></p>
+          <button id="saveCoverAI" class="button button-wide" type="button">Save cover settings</button>
+        </div>
+      </section>
+      <section id="adminBookTransfer" class="admin-section" hidden>
+        <h2>Transfer or clone a book</h2>
+        <p class="muted">Only complete, idle books can be copied. Clones leave the original in place; transfers move it. The recipient starts with fresh reading progress. No transcription is rerun.</p>
+        <form id="adminBookOperationForm" class="cover-ai-controls">
+          <label for="adminBookSourceUser">Current owner</label>
+          <select id="adminBookSourceUser" required></select>
+          <label for="adminBookSelect">Book</label>
+          <select id="adminBookSelect" required disabled></select>
+          <label for="adminBookTargetUser">Recipient</label>
+          <select id="adminBookTargetUser" required></select>
+          <label for="adminBookMode">Action</label>
+          <select id="adminBookMode">
+            <option value="clone">Clone · keep the source book</option>
+            <option value="transfer">Transfer · remove it from the source shelf</option>
+          </select>
+          <p class="fine-print">Audio and processed files are copied independently (no shared hard links), up to 8 GiB per operation. This can take a while.</p>
+          <p id="adminBookOperationMessage" class="form-message" role="status"></p>
+          <button id="adminBookOperationSubmit" class="button button-wide" type="submit" disabled>Clone book</button>
+        </form>
+      </section>
     </section>
   </main>
 
@@ -79,7 +150,7 @@
       </label>
       <p id="importError" class="form-message" role="status"></p>
       <button id="importSubmit" class="button button-wide" type="submit">Add to bookshelf</button>
-      <p class="fine-print">Audio is stored in your private library and transcribed by Groq. EPUB styling is reflowed for reading.</p>
+      <p class="fine-print">Audio is stored in your private library and transcribed by Groq. EPUB styling is reflowed for reading. If cover lookup is enabled, only the book title and author are sent to Open Library; audio and ebook text are not. Catalog cover images load directly from Open Library.</p>
     </form>
   </dialog>
 
@@ -95,6 +166,31 @@
       <div class="retranscribe-actions">
         <button id="cancelRetranscribe" class="button button-quiet" type="button">Keep current</button>
         <button id="confirmRetranscribe" class="button" type="button">Re-transcribe</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="coverReviewDialog" class="sheet cover-review-sheet">
+    <div class="cover-review-content">
+      <button type="button" class="close-button" id="closeCoverReview" aria-label="Close">×</button>
+      <p class="eyebrow">A CATALOG COVER WAS FOUND</p>
+      <h2 id="coverReviewTitle"></h2>
+      <p class="muted">Compare the current cover with this catalog suggestion. Readalong will not replace your selected cover without your choice.</p>
+      <div class="cover-compare">
+        <figure>
+          <img id="coverReviewCurrentImage" alt="">
+          <div id="coverReviewCurrentFallback" class="book-cover cover-2" hidden></div>
+          <figcaption id="coverReviewCurrentCaption">Current cover</figcaption>
+        </figure>
+        <figure>
+          <img id="coverReviewCandidateImage" alt="">
+          <figcaption id="coverReviewCandidateCaption">Open Library suggestion</figcaption>
+        </figure>
+      </div>
+      <p id="coverReviewMessage" class="form-message" role="status"></p>
+      <div class="cover-review-actions">
+        <button type="button" class="button button-quiet" id="keepCoverReview">Keep current</button>
+        <button type="button" class="button" id="useCoverCandidate">Use catalog cover</button>
       </div>
     </div>
   </dialog>

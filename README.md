@@ -25,6 +25,9 @@ private.
 - Upload an audiobook and EPUB together; reflow the EPUB spine and align its
   canonical words to transcript timestamps with a confidence-scored fallback.
 - Search your bookshelf by title or author.
+- Sort your bookshelf by recently added, title, author, recently read, or progress.
+- Extract cover artwork from EPUB/audio sources, review catalog cover matches,
+  and optionally generate a locally rendered SVG cover.
 - Search free LibriVox audio on Internet Archive and match it to Project
   Gutenberg text. Prefer source-linked IDs; when IA omits one, show exact
   title/author candidates for the user to verify before import.
@@ -32,6 +35,7 @@ private.
   position, and per-book appearance/sync settings.
 - Use a private exe.dev-authenticated bookshelf with automatic account
   provisioning and server-side ownership checks.
+- Admins can clone or transfer complete books between active accounts.
 - Install as a PWA; the web app and its media service remain on one VM.
 
 ## Screenshots
@@ -109,6 +113,11 @@ ID, not by email. Pair searches send the title query to Internet Archive (and
 use LibriVox as a bounded fallback); the server also refreshes a public
 Project Gutenberg metadata catalog weekly. Audio and the selected EPUB are
 downloaded into the private library only after the user confirms an import.
+When cover lookup is enabled, Readalong sends only title/author metadata to
+Open Library; audio and ebook text are not sent. Catalog cover images load
+directly from Open Library when visible. Optional generated cover design sends
+title/author and a short EPUB description metadata field (if present) to the
+managed LLM integration, never chapters or audio.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and

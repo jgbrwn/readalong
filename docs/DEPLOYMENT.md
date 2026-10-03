@@ -19,6 +19,22 @@ impose an email allowlist: any identity the proxy authenticates can receive a
 new, separate account and bookshelf on first visit. Never expose the app port
 directly to untrusted networks or accept identity from query parameters.
 
+## Cover lookup contact
+
+When the admin enables catalog cover lookup, the background worker searches
+Open Library using book title/author metadata and identifies regular requests
+with `Readalong/1.0`. If the owner wants a contact in the User-Agent, set
+`OPEN_LIBRARY_CONTACT` in the private `.env`; this is sent to Open Library and
+is not the signed-in user's email. Cover lookup does not send audio, EPUB
+contents, account IDs, or source URLs.
+
+The admin cover-model picker discovers the attached managed LLM service
+through Reflection; it does not need a provider key in Readalong's `.env`.
+The model check sends a tiny inference request and may consume provider quota.
+Configure `OPEN_LIBRARY_CONTACT` only if you want the cover-catalog User-Agent
+to include an installation contact; Readalong never substitutes a user's
+exe.dev email.
+
 ## First admin
 
 Configure `ADMIN_USER_IDS` with stable exe.dev user IDs whenever possible.

@@ -8,21 +8,27 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jgbrwn/readalong/internal/auth"
 	"github.com/jgbrwn/readalong/internal/catalog"
 	"github.com/jgbrwn/readalong/internal/config"
+	"github.com/jgbrwn/readalong/internal/coverai"
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/pipeline"
 	"github.com/jgbrwn/readalong/webui"
 )
 
 type Server struct {
-	cfg      config.Config
-	db       *db.DB
-	pipeline *pipeline.Service
-	catalog  *catalog.Client
-	mux      *http.ServeMux
+	cfg          config.Config
+	db           *db.DB
+	pipeline     *pipeline.Service
+	catalog      *catalog.Client
+	coverAI      coverModelRegistry
+	mux          *http.ServeMux
+	modelCheckMu sync.Mutex
+	modelCheckAt map[string]time.Time
 }
 
 func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler {
@@ -36,11 +42,23 @@ func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler
 }
 
 func NewWithCatalog(cfg config.Config, d *db.DB, catalogClient *catalog.Client, workers ...*pipeline.Service) http.Handler {
+	return newWithCatalogAndCoverAI(cfg, d, catalogClient, coverai.NewRegistry(), workers...)
+}
+
+func newWithCatalogAndCoverAI(cfg config.Config, d *db.DB, catalogClient *catalog.Client,
+	modelRegistry coverModelRegistry, workers ...*pipeline.Service,
+) http.Handler {
 	cfg = cfg.Normalize()
 	if catalogClient == nil {
 		catalogClient = catalog.NewClient()
 	}
-	s := &Server{cfg: cfg, db: d, mux: http.NewServeMux()}
+	if modelRegistry == nil {
+		modelRegistry = coverai.NewRegistry()
+	}
+	s := &Server{
+		cfg: cfg, db: d, mux: http.NewServeMux(), coverAI: modelRegistry,
+		modelCheckAt: make(map[string]time.Time),
+	}
 	s.catalog = catalogClient
 	if len(workers) > 0 {
 		s.pipeline = workers[0]
@@ -60,12 +78,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/books/{id}", s.deleteBook)
 	s.mux.HandleFunc("GET /api/books/{id}/reader", s.reader)
 	s.mux.HandleFunc("GET /api/books/{id}/audio", s.audio)
+	s.mux.HandleFunc("GET /api/books/{id}/cover/{variant}", s.coverFile)
+	s.mux.HandleFunc("POST /api/books/{id}/cover-choice", s.chooseCover)
 	s.mux.HandleFunc("GET /api/books/{id}/events", s.events)
 	s.mux.HandleFunc("PUT /api/books/{id}/progress", s.updateProgress)
 	s.mux.HandleFunc("POST /api/books/{id}/retry", s.retryBook)
 	s.mux.HandleFunc("POST /api/books/{id}/retranscribe", s.retranscribeBook)
 	s.mux.HandleFunc("GET /api/admin/users", s.adminUsers)
+	s.mux.HandleFunc("GET /api/admin/users/{id}/books", s.adminUserBooks)
 	s.mux.HandleFunc("PUT /api/admin/users/{id}", s.updateAdminUser)
+	s.mux.HandleFunc("POST /api/admin/book-operations", s.createAdminBookOperation)
+	s.mux.HandleFunc("GET /api/admin/book-operations/{id}", s.getAdminBookOperation)
+	s.mux.HandleFunc("GET /api/admin/cover-ai", s.getCoverAISettings)
+	s.mux.HandleFunc("POST /api/admin/cover-ai/refresh", s.refreshCoverAIModels)
+	s.mux.HandleFunc("PUT /api/admin/cover-ai", s.saveCoverAISettings)
+	s.mux.HandleFunc("POST /api/admin/cover-ai/check", s.checkCoverAIModel)
 	sub, _ := fs.Sub(webui.Static, "static")
 	fileServer := http.FileServer(http.FS(sub))
 	s.mux.HandleFunc("GET /manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +203,17 @@ func (s *Server) books(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "search query is too long or invalid", http.StatusBadRequest)
 		return
 	}
-	b, err := s.db.SearchBooksForUser(r.Context(), u.ID, query)
+	sortBy := r.URL.Query().Get("sort")
+	if sortBy == "" {
+		sortBy = "recent"
+	}
+	switch sortBy {
+	case "recent", "title", "author", "lastread", "progress":
+	default:
+		http.Error(w, "unsupported bookshelf sort order", http.StatusBadRequest)
+		return
+	}
+	b, err := s.db.SearchBooksForUserSorted(r.Context(), u.ID, query, sortBy)
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return

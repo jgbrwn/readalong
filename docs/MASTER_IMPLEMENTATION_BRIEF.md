@@ -82,9 +82,13 @@ Exit criterion: delete a disposable local test library, restore DB + assets from
 
 ## Phase 4 — polish
 
-- cover extraction;
+First pass implemented: cover extraction/catalog reconciliation, bookshelf
+sorting, admin clone/transfer, and typography/theme controls. Cover source
+policy and backoff details are in `docs/COVERS.md`.
+
+Still planned:
+
 - chapter navigation;
-- typography/theme controls;
 - bookmarks/quotes;
 - processed-source cleanup policy;
 - optional offline-download mode;
