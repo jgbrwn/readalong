@@ -143,12 +143,24 @@
   “keep current” lookup pause are enforced.
 - Cover image endpoints and cover choices are owner-scoped. Cover tasks never
   alter book readiness or transcription jobs.
+- A ready owner can manually queue one cover regeneration at a time; current
+  selection remains visible while catalog and fresh AI candidates are prepared.
+- Regeneration can offer both catalog and newly generated SVG options; choosing
+  either updates selection, removes stale candidates, and pauses polling until
+  the owner manually regenerates again.
+- Clone/transfer remaps and copies pending AI candidate assets as well as the
+  selected and catalog cover files.
 - Generated cover recipes accept only a fixed theme and validated colors;
   Readalong renders escaped SVG locally and rejects model-authored markup.
-- Reflection model discovery caches a sanitized vision-capable list and serves
-  stale results if discovery fails; listing models does not invoke one.
-- Responses and Chat Completions health checks use the selected API style,
-  send a tiny request, report quota/auth/endpoint failures, and are throttled.
+- Reflection discovery includes text-output candidates across OpenAI/ChatGPT,
+  Neuralwatt, and OpenRouter; normalizes modalities and pricing, deduplicates
+  OpenAI aliases, and serves stale cache data on discovery failure.
+- Auto API checks use valid Responses input and parse SSE deltas as well as
+  Chat Completions string/multipart text; endpoint fallback, truncation,
+  no-text, quota/auth, refusal, and provider-rate-limit outcomes are distinct.
+- Live managed-gateway smoke checks exercise one OpenAI Responses model, one
+  Neuralwatt Chat Completions model, and one OpenRouter Chat Completions model;
+  temporary upstream rate limits remain unhealthy, not false positives.
 
 ## Admin book clone/transfer
 

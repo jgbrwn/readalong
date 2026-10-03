@@ -27,7 +27,8 @@ private.
 - Search your bookshelf by title or author.
 - Sort your bookshelf by recently added, title, author, recently read, or progress.
 - Extract cover artwork from EPUB/audio sources, review catalog cover matches,
-  and optionally generate a locally rendered SVG cover.
+  and optionally generate a locally rendered SVG cover. Regenerate a cover to
+  rerun discovery/design and choose between the current, catalog, and AI cover.
 - Search free LibriVox audio on Internet Archive and match it to Project
   Gutenberg text. Prefer source-linked IDs; when IA omits one, show exact
   title/author candidates for the user to verify before import.

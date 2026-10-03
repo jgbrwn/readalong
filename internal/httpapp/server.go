@@ -80,6 +80,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/books/{id}/audio", s.audio)
 	s.mux.HandleFunc("GET /api/books/{id}/cover/{variant}", s.coverFile)
 	s.mux.HandleFunc("POST /api/books/{id}/cover-choice", s.chooseCover)
+	s.mux.HandleFunc("POST /api/books/{id}/cover-regenerate", s.regenerateCover)
 	s.mux.HandleFunc("GET /api/books/{id}/events", s.events)
 	s.mux.HandleFunc("PUT /api/books/{id}/progress", s.updateProgress)
 	s.mux.HandleFunc("POST /api/books/{id}/retry", s.retryBook)

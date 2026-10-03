@@ -118,9 +118,13 @@ func (s *Service) process(ctx context.Context, operation db.AdminBookOperation) 
 		s.fail(ctx, operation.ID, "The candidate cover path is invalid.")
 		return
 	}
+	if paths.CoverAICandidate, err = remapRelativePath(s.cfg.DataDir, sourceDir, destinationDir, coverState.AICandidateRelPath); err != nil {
+		s.fail(ctx, operation.ID, "The generated cover candidate path is invalid.")
+		return
+	}
 	files, total, err := fileManifest(s.cfg.DataDir, sourceDir, []string{
 		book.AudioRelPath, book.EpubRelPath, book.EbookJSONRelPath, book.TranscriptRelPath,
-		book.AlignmentRelPath, coverState.SelectedRelPath, coverState.CandidateRelPath,
+		book.AlignmentRelPath, coverState.SelectedRelPath, coverState.CandidateRelPath, coverState.AICandidateRelPath,
 	})
 	if err != nil || total > maxBookCopyBytes {
 		s.fail(ctx, operation.ID, "The book is missing files or exceeds the 8 GiB copy limit.")
@@ -288,6 +292,10 @@ func (s *Service) validatePublishedArtifacts(ctx context.Context, book db.Book) 
 	if err != nil {
 		return paths, err
 	}
+	paths.CoverAICandidate, err = remapRelativePath(s.cfg.DataDir, bookDir, bookDir, cover.AICandidateRelPath)
+	if err != nil {
+		return paths, err
+	}
 	return paths, validateStagedArtifacts(s.cfg.DataDir, bookDir, bookDir, paths)
 }
 
@@ -310,6 +318,10 @@ func (s *Service) rollbackTransfer(ctx context.Context, operation db.AdminBookOp
 		return false
 	}
 	sourcePaths.CoverCandidate, err = remapRelativePath(s.cfg.DataDir, destinationDir, sourceDir, cover.CandidateRelPath)
+	if err != nil {
+		return false
+	}
+	sourcePaths.CoverAICandidate, err = remapRelativePath(s.cfg.DataDir, destinationDir, sourceDir, cover.AICandidateRelPath)
 	if err != nil || validateStagedArtifacts(s.cfg.DataDir, sourceDir, sourceDir, sourcePaths) != nil {
 		return false
 	}
@@ -594,7 +606,8 @@ func validateStagedArtifacts(dataDir, destinationDir, stageDir string, paths db.
 	if err := check(paths.Transcript, true); err != nil {
 		return err
 	}
-	for _, optional := range []string{paths.EPUB, paths.EbookJSON, paths.Alignment, paths.CoverSelected, paths.CoverCandidate} {
+	for _, optional := range []string{paths.EPUB, paths.EbookJSON, paths.Alignment, paths.CoverSelected,
+		paths.CoverCandidate, paths.CoverAICandidate} {
 		if err := check(optional, false); err != nil {
 			return err
 		}

@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	coverAISettingsKey = "cover_ai_settings"
-	coverAIModelsKey   = "cover_ai_models"
-	modelCatalogTTL    = 6 * time.Hour
+	coverAISettingsKey  = "cover_ai_settings"
+	coverAIModelsKey    = "cover_ai_models"
+	modelCatalogTTL     = 6 * time.Hour
+	modelCatalogVersion = 2
 )
 
 type coverModelRegistry interface {
@@ -28,6 +29,7 @@ type coverAISettings = coverai.Settings
 type cachedCoverModels struct {
 	Models    []coverai.Model `json:"models"`
 	FetchedAt time.Time       `json:"fetched_at"`
+	Version   int             `json:"version"`
 }
 
 type coverAIResponse struct {
@@ -68,7 +70,7 @@ func (s *Server) refreshCoverAIModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not refresh the managed LLM model list", http.StatusBadGateway)
 		return
 	}
-	cache := cachedCoverModels{Models: models, FetchedAt: time.Now().UTC()}
+	cache := cachedCoverModels{Models: models, FetchedAt: time.Now().UTC(), Version: modelCatalogVersion}
 	if err := s.storeCoverModels(r.Context(), cache); err != nil {
 		http.Error(w, "model list could not be cached", http.StatusInternalServerError)
 		return
@@ -92,8 +94,9 @@ func (s *Server) saveCoverAISettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if settings.ModelID != "" {
-		if settings.APIStyle != coverai.APIResponses && settings.APIStyle != coverai.APIChat {
-			http.Error(w, "choose Responses or Chat Completions for this model", http.StatusBadRequest)
+		if settings.APIStyle != coverai.APIAuto && settings.APIStyle != coverai.APIResponses &&
+			settings.APIStyle != coverai.APIChat {
+			http.Error(w, "choose Auto, Responses, or Chat Completions for this model", http.StatusBadRequest)
 			return
 		}
 		cache, _, _, err := s.loadCoverModels(r.Context(), false)
@@ -102,8 +105,9 @@ func (s *Server) saveCoverAISettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		settings.APIStyle = ""
+		settings.APIStyle = coverai.APIAuto
 	}
+	settings.APIStyleVersion = coverai.CurrentSettingsVersion
 	payload, err := json.Marshal(settings)
 	if err != nil {
 		http.Error(w, "cover settings could not be saved", http.StatusInternalServerError)
@@ -135,6 +139,11 @@ func (s *Server) checkCoverAIModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.ModelID = strings.TrimSpace(request.ModelID)
+	if request.APIStyle != coverai.APIAuto && request.APIStyle != coverai.APIResponses &&
+		request.APIStyle != coverai.APIChat {
+		http.Error(w, "choose Auto, Responses, or Chat Completions", http.StatusBadRequest)
+		return
+	}
 	cache, _, _, err := s.loadCoverModels(r.Context(), false)
 	if err != nil || !containsCoverModel(cache.Models, request.ModelID) {
 		http.Error(w, "select a model from the discovered model list", http.StatusBadRequest)
@@ -162,17 +171,26 @@ func (s *Server) readCoverAISettings(ctx context.Context) (coverAISettings, erro
 	setting, found, err := s.db.AppSetting(ctx, coverAISettingsKey)
 	if err != nil || !found {
 		return coverAISettings{
-			APIStyle: coverai.APIResponses, CatalogLookupEnabled: true, UseBookDescription: true,
+			APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
+			CatalogLookupEnabled: true, UseBookDescription: true,
 		}, err
 	}
 	var settings coverAISettings
 	if err := json.Unmarshal([]byte(setting.Value), &settings); err != nil {
 		return coverAISettings{
-			APIStyle: coverai.APIResponses, CatalogLookupEnabled: true, UseBookDescription: true,
+			APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
+			CatalogLookupEnabled: true, UseBookDescription: true,
 		}, nil
 	}
-	if settings.APIStyle == "" {
-		settings.APIStyle = coverai.APIResponses
+	if settings.APIStyleVersion < coverai.CurrentSettingsVersion {
+		// Older settings stored a default Responses preference even for models
+		// that only expose Chat Completions. Re-probe the model on first use.
+		settings.APIStyle = coverai.APIAuto
+		settings.APIStyleVersion = coverai.CurrentSettingsVersion
+	}
+	if settings.APIStyle != coverai.APIAuto && settings.APIStyle != coverai.APIResponses &&
+		settings.APIStyle != coverai.APIChat {
+		settings.APIStyle = coverai.APIAuto
 	}
 	return settings, nil
 }
@@ -196,13 +214,14 @@ func (s *Server) loadCoverModels(ctx context.Context, forceRefresh bool) (cached
 			cache = cachedCoverModels{}
 		}
 	}
-	stale := cache.FetchedAt.IsZero() || time.Since(cache.FetchedAt) > modelCatalogTTL
+	stale := cache.Version < modelCatalogVersion || cache.FetchedAt.IsZero() ||
+		time.Since(cache.FetchedAt) > modelCatalogTTL
 	if !forceRefresh && !stale {
 		return cache, false, "", nil
 	}
 	models, refreshErr := s.coverAI.Discover(ctx)
 	if refreshErr == nil {
-		cache = cachedCoverModels{Models: models, FetchedAt: time.Now().UTC()}
+		cache = cachedCoverModels{Models: models, FetchedAt: time.Now().UTC(), Version: modelCatalogVersion}
 		if err := s.storeCoverModels(ctx, cache); err != nil {
 			return cache, false, "", err
 		}
@@ -215,6 +234,7 @@ func (s *Server) loadCoverModels(ctx context.Context, forceRefresh bool) (cached
 }
 
 func (s *Server) storeCoverModels(ctx context.Context, cache cachedCoverModels) error {
+	cache.Version = modelCatalogVersion
 	payload, err := json.Marshal(cache)
 	if err != nil {
 		return err
@@ -224,7 +244,7 @@ func (s *Server) storeCoverModels(ctx context.Context, cache cachedCoverModels) 
 
 func containsCoverModel(models []coverai.Model, id string) bool {
 	for _, model := range models {
-		if model.ID == id && model.Vision {
+		if model.ID == id && model.TextOutput {
 			return true
 		}
 	}

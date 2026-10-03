@@ -37,8 +37,10 @@ func operationFixture(t *testing.T, mode string) (*db.DB, string, db.AdminBookOp
 	audioPath := filepath.Join(bookDir, "playback.mp3")
 	transcriptPath := filepath.Join(bookDir, "transcript.json.gz")
 	coverPath := filepath.Join(bookDir, "cover", "generated.svg")
+	coverCandidatePath := filepath.Join(bookDir, "cover", "generated-review.svg")
 	for path, content := range map[string]string{
 		audioPath: "audio-bytes", transcriptPath: "transcript-bytes", coverPath: "<svg>cover</svg>",
+		coverCandidatePath: "<svg>candidate</svg>",
 		filepath.Join(bookDir, "source", "original.m4b"): "source-bytes",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -73,8 +75,10 @@ func operationFixture(t *testing.T, mode string) (*db.DB, string, db.AdminBookOp
 		t.Fatal(err)
 	}
 	if _, err := database.ExecContext(context.Background(), `INSERT INTO book_cover_state
-		(book_id,status,selected_kind,selected_relpath,selected_provider,lookup_paused,updated_at)
-		VALUES(?,'selected','ai_svg',?,'Readalong vector art',1,?)`, bookID, rel(coverPath), now); err != nil {
+		(book_id,status,selected_kind,selected_relpath,selected_provider,ai_candidate_relpath,
+		 ai_candidate_year,lookup_paused,updated_at)
+		VALUES(?,'review','ai_svg',?,'Readalong vector art',?,1935,0,?)`,
+		bookID, rel(coverPath), rel(coverCandidatePath), now); err != nil {
 		database.Close()
 		t.Fatal(err)
 	}
@@ -138,13 +142,16 @@ func TestCloneCopiesArtifactsIndependentlyAndKeepsSource(t *testing.T) {
 	}
 	targetDir := pipeline.BookDirectory(dataDir, "target", operation.TargetBookID)
 	targetCover := filepath.Join(targetDir, "cover", "generated.svg")
+	targetCoverCandidate := filepath.Join(targetDir, "cover", "generated-review.svg")
 	targetAudio := filepath.Join(targetDir, "playback.mp3")
-	for _, path := range []string{targetCover, targetAudio, filepath.Join(targetDir, "source", "original.m4b")} {
+	for _, path := range []string{targetCover, targetCoverCandidate, targetAudio, filepath.Join(targetDir, "source", "original.m4b")} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("clone artifact %q missing: %v", path, err)
 		}
 	}
-	if cloned.CoverKind != "ai_svg" || cloned.CoverURL != "/api/books/book-clone/cover/selected" {
+	if cloned.CoverKind != "ai_svg" || cloned.CoverURL != "/api/books/book-clone/cover/selected" ||
+		cloned.CoverAICandidateURL != "/api/books/book-clone/cover/ai-candidate" ||
+		!cloned.CoverReviewNeeded {
 		t.Fatalf("cover state was not cloned: %#v", cloned)
 	}
 	if err := os.WriteFile(targetAudio, []byte("changed"), 0600); err != nil {
@@ -182,7 +189,9 @@ func TestTransferMovesOwnerPathsAndRemovesFormerOwnerDirectory(t *testing.T) {
 	if transferred.AudioRelPath != filepath.Join(targetBookDir, "playback.mp3") {
 		t.Fatalf("transferred path was not rewritten: %q", transferred.AudioRelPath)
 	}
-	if transferred.CoverKind != "ai_svg" || transferred.CoverURL != "/api/books/"+operation.BookID+"/cover/selected" {
+	if transferred.CoverKind != "ai_svg" || transferred.CoverURL != "/api/books/"+operation.BookID+"/cover/selected" ||
+		transferred.CoverAICandidateURL != "/api/books/"+operation.BookID+"/cover/ai-candidate" ||
+		!transferred.CoverReviewNeeded {
 		t.Fatalf("cover state was not transferred: %#v", transferred)
 	}
 	if _, err := os.Stat(sourceDir); !os.IsNotExist(err) {
@@ -240,8 +249,12 @@ func TestInterruptedTransferRecoversOrRollsOwnershipBack(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			paths.CoverAICandidate, err = remapRelativePath(dataDir, sourceDir, destinationDir, cover.AICandidateRelPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 			files, _, err := fileManifest(dataDir, sourceDir, []string{
-				book.AudioRelPath, book.TranscriptRelPath, cover.SelectedRelPath,
+				book.AudioRelPath, book.TranscriptRelPath, cover.SelectedRelPath, cover.AICandidateRelPath,
 			})
 			if err != nil {
 				t.Fatal(err)

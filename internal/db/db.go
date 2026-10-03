@@ -23,42 +23,45 @@ var (
 )
 
 type Book struct {
-	ID                     string   `json:"id"`
-	Title                  string   `json:"title"`
-	Author                 string   `json:"author"`
-	SourceKind             string   `json:"source_kind"`
-	Mode                   string   `json:"mode"`
-	GutenbergID            string   `json:"gutenberg_id,omitempty"`
-	EbookSourceURL         string   `json:"ebook_source_url,omitempty"`
-	AlignmentQuality       *float64 `json:"alignment_quality,omitempty"`
-	Status                 string   `json:"status"`
-	JobStatus              string   `json:"job_status,omitempty"`
-	DurationMS             int64    `json:"duration_ms"`
-	Stage                  string   `json:"stage,omitempty"`
-	Progress               float64  `json:"progress,omitempty"`
-	Error                  string   `json:"error,omitempty"`
-	PositionMS             int64    `json:"position_ms,omitempty"`
-	PlaybackRate           float64  `json:"playback_rate,omitempty"`
-	SyncOffsetMS           int64    `json:"sync_offset_ms,omitempty"`
-	AppearanceJSON         string   `json:"appearance_json,omitempty"`
-	CoverStatus            string   `json:"cover_status,omitempty"`
-	CoverKind              string   `json:"cover_kind,omitempty"`
-	CoverProvider          string   `json:"cover_provider,omitempty"`
-	CoverURL               string   `json:"cover_url,omitempty"`
-	CoverCandidateURL      string   `json:"cover_candidate_url,omitempty"`
-	CoverCandidateProvider string   `json:"cover_candidate_provider,omitempty"`
-	CoverCandidateYear     int      `json:"cover_candidate_year,omitempty"`
-	CoverReviewNeeded      bool     `json:"cover_review_needed,omitempty"`
-	CoverYear              int      `json:"cover_year,omitempty"`
-	CreatedAt              string   `json:"created_at"`
-	UpdatedAt              string   `json:"updated_at"`
-	OwnerUserID            string   `json:"-"`
-	SourceURL              string   `json:"-"`
-	AudioRelPath           string   `json:"-"`
-	EpubRelPath            string   `json:"-"`
-	EbookJSONRelPath       string   `json:"-"`
-	AlignmentRelPath       string   `json:"-"`
-	TranscriptRelPath      string   `json:"-"`
+	ID                      string   `json:"id"`
+	Title                   string   `json:"title"`
+	Author                  string   `json:"author"`
+	SourceKind              string   `json:"source_kind"`
+	Mode                    string   `json:"mode"`
+	GutenbergID             string   `json:"gutenberg_id,omitempty"`
+	EbookSourceURL          string   `json:"ebook_source_url,omitempty"`
+	AlignmentQuality        *float64 `json:"alignment_quality,omitempty"`
+	Status                  string   `json:"status"`
+	JobStatus               string   `json:"job_status,omitempty"`
+	DurationMS              int64    `json:"duration_ms"`
+	Stage                   string   `json:"stage,omitempty"`
+	Progress                float64  `json:"progress,omitempty"`
+	Error                   string   `json:"error,omitempty"`
+	PositionMS              int64    `json:"position_ms,omitempty"`
+	PlaybackRate            float64  `json:"playback_rate,omitempty"`
+	SyncOffsetMS            int64    `json:"sync_offset_ms,omitempty"`
+	AppearanceJSON          string   `json:"appearance_json,omitempty"`
+	CoverStatus             string   `json:"cover_status,omitempty"`
+	CoverRegenerationQueued bool     `json:"cover_regeneration_queued,omitempty"`
+	CoverKind               string   `json:"cover_kind,omitempty"`
+	CoverProvider           string   `json:"cover_provider,omitempty"`
+	CoverURL                string   `json:"cover_url,omitempty"`
+	CoverCandidateURL       string   `json:"cover_candidate_url,omitempty"`
+	CoverCandidateProvider  string   `json:"cover_candidate_provider,omitempty"`
+	CoverCandidateYear      int      `json:"cover_candidate_year,omitempty"`
+	CoverAICandidateURL     string   `json:"cover_ai_candidate_url,omitempty"`
+	CoverAICandidateYear    int      `json:"cover_ai_candidate_year,omitempty"`
+	CoverReviewNeeded       bool     `json:"cover_review_needed,omitempty"`
+	CoverYear               int      `json:"cover_year,omitempty"`
+	CreatedAt               string   `json:"created_at"`
+	UpdatedAt               string   `json:"updated_at"`
+	OwnerUserID             string   `json:"-"`
+	SourceURL               string   `json:"-"`
+	AudioRelPath            string   `json:"-"`
+	EpubRelPath             string   `json:"-"`
+	EbookJSONRelPath        string   `json:"-"`
+	AlignmentRelPath        string   `json:"-"`
+	TranscriptRelPath       string   `json:"-"`
 }
 
 type NewBook struct {
@@ -173,9 +176,11 @@ CREATE TABLE IF NOT EXISTS book_cover_state (
  selected_provider TEXT, selected_year INTEGER NOT NULL DEFAULT 0,
  candidate_kind TEXT NOT NULL DEFAULT '', candidate_relpath TEXT, candidate_url TEXT,
 	candidate_provider TEXT, candidate_year INTEGER NOT NULL DEFAULT 0,
+	ai_candidate_relpath TEXT, ai_candidate_year INTEGER NOT NULL DEFAULT 0,
 	last_checked_at TEXT, next_check_at TEXT, no_match_count INTEGER NOT NULL DEFAULT 0,
 	failure_count INTEGER NOT NULL DEFAULT 0, lookup_paused INTEGER NOT NULL DEFAULT 0,
 	local_scan_needed INTEGER NOT NULL DEFAULT 1, deleting INTEGER NOT NULL DEFAULT 0,
+	regeneration_requested INTEGER NOT NULL DEFAULT 0,
 	lease_until TEXT, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS book_cover_due ON book_cover_state(lookup_paused,next_check_at,lease_until);
@@ -208,6 +213,15 @@ CREATE INDEX IF NOT EXISTS admin_book_operations_queue ON admin_book_operations(
 		return err
 	}
 	if err := d.ensureColumn("book_cover_state", "local_scan_needed", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "ai_candidate_relpath", "TEXT"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "ai_candidate_year", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "regeneration_requested", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -383,12 +397,16 @@ const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b
 	b.created_at,b.updated_at,b.owner_user_id,COALESCE(b.source_url,''),COALESCE(b.audio_relpath,''),
 	COALESCE(b.epub_relpath,''),COALESCE(b.ebook_json_relpath,''),COALESCE(b.transcript_relpath,''),
 	COALESCE(b.alignment_relpath,''),b.alignment_quality,COALESCE(b.gutenberg_id,''),
-	COALESCE(b.ebook_source_url,''),COALESCE(cs.status,'pending'),COALESCE(cs.selected_kind,''),
+	COALESCE(b.ebook_source_url,''),COALESCE(cs.status,'pending'),COALESCE(cs.regeneration_requested,0),
+	COALESCE(cs.selected_kind,''),
 	CASE WHEN COALESCE(cs.selected_url,'')<>'' THEN cs.selected_url
 		WHEN COALESCE(cs.selected_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/selected' ELSE '' END,
 	CASE WHEN COALESCE(cs.candidate_url,'')<>'' THEN cs.candidate_url
 		WHEN COALESCE(cs.candidate_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/candidate' ELSE '' END,
-	CASE WHEN COALESCE(cs.candidate_url,'')<>'' OR COALESCE(cs.candidate_relpath,'')<>'' THEN 1 ELSE 0 END,
+	CASE WHEN COALESCE(cs.ai_candidate_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/ai-candidate' ELSE '' END,
+	COALESCE(cs.ai_candidate_year,0),
+	CASE WHEN COALESCE(cs.candidate_url,'')<>'' OR COALESCE(cs.candidate_relpath,'')<>'' OR
+		COALESCE(cs.ai_candidate_relpath,'')<>'' THEN 1 ELSE 0 END,
 	COALESCE(cs.selected_year,0),COALESCE(cs.selected_provider,''),COALESCE(cs.candidate_provider,''),
 	COALESCE(cs.candidate_year,0)
 	FROM books b
@@ -407,8 +425,10 @@ func scanBook(row rowScanner) (Book, error) {
 		&b.JobStatus, &b.Stage, &b.Progress, &b.Error, &b.PositionMS, &b.PlaybackRate, &b.SyncOffsetMS,
 		&b.AppearanceJSON, &b.CreatedAt, &b.UpdatedAt, &b.OwnerUserID, &b.SourceURL, &b.AudioRelPath,
 		&b.EpubRelPath, &b.EbookJSONRelPath, &b.TranscriptRelPath, &b.AlignmentRelPath,
-		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL, &b.CoverStatus, &b.CoverKind,
-		&b.CoverURL, &b.CoverCandidateURL, &b.CoverReviewNeeded, &b.CoverYear,
+		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL, &b.CoverStatus,
+		&b.CoverRegenerationQueued, &b.CoverKind,
+		&b.CoverURL, &b.CoverCandidateURL, &b.CoverAICandidateURL, &b.CoverAICandidateYear,
+		&b.CoverReviewNeeded, &b.CoverYear,
 		&b.CoverProvider, &b.CoverCandidateProvider, &b.CoverCandidateYear)
 	if alignmentQuality.Valid {
 		b.AlignmentQuality = &alignmentQuality.Float64

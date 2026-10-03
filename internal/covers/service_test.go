@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestLookupCacheDeduplicatesAcrossEquivalentBookMetadata(t *testing.T) {
 	service.catalog = &OpenLibrary{BaseURL: server.URL, HTTP: server.Client()}
 	now := time.Now().UTC()
 	first := db.CoverTask{Title: "No Cover!", Author: "A. Writer"}
-	_, found, next, err := service.lookupOpenLibrary(context.Background(), first, now)
+	_, found, next, err := service.lookupOpenLibrary(context.Background(), first, now, false)
 	if err != nil || found {
 		t.Fatalf("first lookup found=%v err=%v", found, err)
 	}
@@ -46,12 +47,145 @@ func TestLookupCacheDeduplicatesAcrossEquivalentBookMetadata(t *testing.T) {
 		t.Fatalf("first negative retry = %s, want %s", next, want)
 	}
 	second := db.CoverTask{Title: "no cover", Author: "A Writer"}
-	_, found, nextCached, err := service.lookupOpenLibrary(context.Background(), second, now.Add(time.Hour))
+	_, found, nextCached, err := service.lookupOpenLibrary(context.Background(), second, now.Add(time.Hour), false)
 	if err != nil || found || calls != 1 {
 		t.Fatalf("equivalent lookup found=%v calls=%d err=%v", found, calls, err)
 	}
 	if nextCached.Sub(next) > time.Second || next.Sub(nextCached) > time.Second {
 		t.Fatalf("cached retry time = %s, want %s", nextCached, next)
+	}
+}
+
+func TestManualRegenerationBypassesFreshNegativeCacheOnce(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"docs": []any{}})
+	}))
+	defer server.Close()
+	database, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := New(config.Config{DataDir: t.TempDir()}, database, nil)
+	service.catalog = &OpenLibrary{BaseURL: server.URL, HTTP: server.Client()}
+	now := time.Now().UTC()
+	task := db.CoverTask{Title: "Same Book", Author: "A Writer"}
+	if _, _, _, err := service.lookupOpenLibrary(context.Background(), task, now, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := service.lookupOpenLibrary(context.Background(), task, now.Add(time.Hour), true); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("manual regeneration reused the fresh negative cache: provider calls=%d", calls)
+	}
+}
+
+func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dataDir := t.TempDir()
+	database, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.UpsertUser(ctx, "cover-owner", "owner@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateBookAndJob(ctx, db.NewBook{
+		ID: "manual-cover", JobID: "manual-cover-job", OwnerUserID: "cover-owner",
+		Title: "Example Book", Author: "A. Writer", SourceKind: "librivox",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteJob(ctx, "manual-cover-job"); err != nil {
+		t.Fatal(err)
+	}
+	currentCover := filepath.Join(pipeline.BookDirectory(dataDir, "cover-owner", "manual-cover"),
+		"cover", "current.svg")
+	if err := writeAtomic(currentCover, []byte(`<svg xmlns="http://www.w3.org/2000/svg"><text>current</text></svg>`)); err != nil {
+		t.Fatal(err)
+	}
+	currentCoverRel, err := filepath.Rel(dataDir, currentCover)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE book_cover_state SET status='selected',
+		selected_kind='audio',selected_relpath=?,lookup_paused=1 WHERE book_id='manual-cover'`, currentCoverRel); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueueCoverRegeneration(ctx, "cover-owner", "manual-cover"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	task, found, err := database.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(5*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !task.RegenerationRequested {
+		t.Fatalf("regeneration claim=%#v found=%v err=%v", task, found, err)
+	}
+
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/integrations":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"integrations": []any{map[string]any{
+					"name": "llm", "type": "llm", "help": "Models: http://" + r.Host + "/v1/models",
+				}},
+			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{
+				"id": "neuralwatt/test-design", "owned_by": "neuralwatt",
+				"metadata": map[string]any{"capabilities": map[string]any{"vision": false}},
+			}}})
+		case "/v1/chat/completions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+				"message":       map[string]any{"content": `{"theme":"botanical","colors":["#112233","#445566","#778899"]}`},
+				"finish_reason": "stop",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer llmServer.Close()
+	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"docs": []any{map[string]any{
+			"key": "/works/OL123W", "title": "Example Book", "author_name": []string{"A. Writer"},
+			"first_publish_year": 1930, "cover_i": 77,
+		}}})
+	}))
+	defer catalogServer.Close()
+	settings, err := json.Marshal(coverai.Settings{
+		Enabled: true, CatalogLookupEnabled: true, ModelID: "neuralwatt/test-design",
+		APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetAppSetting(ctx, coverAISettingsKey, string(settings)); err != nil {
+		t.Fatal(err)
+	}
+	registry := coverai.NewRegistry()
+	registry.ReflectionURL = llmServer.URL + "/integrations"
+	registry.HTTP = llmServer.Client()
+	service := New(config.Config{DataDir: dataDir}, database, registry)
+	service.catalog = &OpenLibrary{BaseURL: catalogServer.URL + "/search.json", HTTP: catalogServer.Client()}
+	service.process(ctx, task)
+
+	state, err := database.CoverStateForUser(ctx, "cover-owner", "manual-cover")
+	if err != nil || state.Status != "review" || state.RegenerationRequested ||
+		state.SelectedKind != "audio" || state.SelectedRelPath != currentCoverRel ||
+		state.CandidateURL != "https://covers.openlibrary.org/b/id/77-M.jpg?default=false" ||
+		state.AICandidateRelPath == "" || state.AICandidateYear != 1930 {
+		t.Fatalf("manual regeneration results=%#v err=%v", state, err)
+	}
+	aiPath := filepath.Join(dataDir, state.AICandidateRelPath)
+	aiCover, err := os.ReadFile(aiPath)
+	if err != nil || !strings.HasPrefix(string(aiCover), "<svg ") ||
+		!strings.Contains(string(aiCover), "Example Book") {
+		t.Fatalf("fresh AI cover missing or invalid: bytes=%d err=%v", len(aiCover), err)
 	}
 }
 
@@ -234,7 +368,7 @@ func TestCoverProviderDailyBudgetDefersWithoutSendingMoreSearches(t *testing.T) 
 		}
 	}
 	_, _, next, err := service.lookupOpenLibrary(context.Background(),
-		db.CoverTask{Title: "A title", Author: "A writer"}, now)
+		db.CoverTask{Title: "A title", Author: "A writer"}, now, false)
 	if err != errOpenLibraryDailyLimit || calls != 0 {
 		t.Fatalf("daily limit err=%v calls=%d", err, calls)
 	}

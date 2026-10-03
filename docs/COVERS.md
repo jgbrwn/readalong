@@ -77,35 +77,52 @@ cover corpus:
 ## Generated fallback and Reflection models
 
 The admin panel discovers the attached `type=llm` integration from Reflection,
-then reads its OpenAI-compatible `/v1/models` list. The inventory cache lasts
-six hours and serves stale data if discovery is temporarily unavailable.
-Capabilities and pricing are retained in a sanitized form; the admin chooses
-a vision-capable design model and can select Responses or Chat Completions.
-The API style is inferred from model metadata/provider when possible, and the
-admin can override it.
+then reads its OpenAI-compatible `/v1/models` list. It includes text-output
+models from OpenAI/ChatGPT, Neuralwatt, and OpenRouter; OpenRouter modality
+metadata and provider pricing are normalized. Models without explicit
+text-output metadata remain selectable as inferred candidates and are marked
+“check required.” The six-hour cache serves stale results if discovery is
+temporarily unavailable.
 
-The “Check model” action sends a tiny inference request through that selected
-API style. It can consume provider quota; 402/credit errors, 429/quota errors,
-authentication errors, unsupported models/endpoints, and healthy responses
-are reported separately. Checks are throttled per model.
+The API format defaults to **Auto**. The model's advertised metadata/gateway
+selects the preferred Responses or Chat Completions API; it tries the alternate
+after an endpoint rejection or a successful response without a valid design
+recipe, but not for auth, billing, rate-limit, refusal, or truncation failures.
+The health check
+understands Responses SSE text deltas (including gateways whose final response
+omits accumulated output) and Chat Completions string or multipart text. It
+uses a bounded output budget and applies “no reasoning” only when the model
+advertises that option. Failures distinguish provider limits/credits,
+unsupported endpoints, truncation, refusals, and no-text responses. Checks
+remain explicit and may consume quota.
 
-The currently attached model inventory marks vision input but does not
-advertise image output. A vision model is not assumed to generate pixels.
-Instead, the selected model returns a strict theme/color recipe based on the
-title, trusted author, optional short EPUB description metadata, and verified
+The selected model returns a strict theme/color recipe based on the title,
+trusted author, optional short EPUB description metadata, and verified
 publication year; the server validates it and renders an SVG from fixed,
-script-free templates. Arbitrary model-authored SVG/HTML, URLs, scripts, and
-file paths are never accepted.
+script-free templates. Vision input and native image output are separate
+capabilities and neither is required for this text-to-SVG workflow. Arbitrary
+model-authored SVG/HTML, URLs, scripts, and file paths are never accepted.
 
 ## Compare and choose
 
-If an Open Library candidate appears while a generated cover is selected,
-Readalong keeps the generated cover and adds a discreet, reduced-motion-aware
-“Cover found · review” shelf hint. A modal compares both and offers:
+If an Open Library candidate appears while a cover is selected, Readalong keeps
+the selected cover and adds a discreet, reduced-motion-aware
+“Cover ready · choose” shelf hint. The modal can compare the current cover with
+catalog and AI suggestions and offers:
 
 - **Use catalog cover** — select the candidate and stop automatic lookup.
-- **Keep current** — dismiss the candidate and pause automatic lookup.
-- **Decide later** — leave the candidate available for review.
+- **Use AI cover** — select the newly rendered SVG and pause automatic lookup.
+- **Keep current** — dismiss suggestions and pause automatic lookup.
+- **Not now** — leave suggestions available for review.
 
 No source cover replaces a selected/generated cover without the owner's
 explicit choice.
+
+Every ready book also has a **Regenerate cover** action beside Re-transcribe.
+It clears stale suggestions, queues a fresh catalog lookup and—if enabled—a
+new AI design, while preserving the selected cover during processing. When
+results arrive, the owner can choose the current, catalog, or freshly generated
+cover. Choosing “Not now” leaves the suggestions in place; regenerating again
+restarts the process and returns new choices. Manual checks bypass a still-fresh
+negative lookup cache, but remain subject to the same global request spacing
+and daily provider budget.

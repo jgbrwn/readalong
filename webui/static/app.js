@@ -124,6 +124,7 @@ async function loadBooks() {
         ${fallbackCover}
       </div>`;
       const jobActive = book.job_status === 'queued' || book.job_status === 'running';
+      const coverRegenerating = Boolean(book.cover_regeneration_queued) || book.cover_status === 'checking';
       const retranscribeLabel = book.stage === 'rate_limited'
         ? 'Waiting for Groq…'
         : book.stage === 'aligning_retranscription'
@@ -143,11 +144,15 @@ async function loadBooks() {
             <div class="progress-track"><span style="width:${percentage}%"></span></div>
           </div>
         </a>
-        ${book.cover_review_needed ? `<button class="cover-review-hint" type="button" data-cover-review-id="${escapeHTML(book.id)}">Cover found · review</button>` : ''}
+        ${book.cover_review_needed ? `<button class="cover-review-hint" type="button" data-cover-review-id="${escapeHTML(book.id)}">Cover ready · choose</button>` : ''}
         ${book.status === 'ready' ? `<div class="book-card-actions">
           <button class="retranscribe-book" type="button" data-retranscribe-id="${escapeHTML(book.id)}"
             data-retranscribe-title="${escapeHTML(title)}" ${jobActive ? 'disabled' : ''}>
             ${escapeHTML(retranscribeLabel)}
+          </button>
+          <button class="regenerate-cover" type="button" data-cover-regenerate-id="${escapeHTML(book.id)}"
+            ${jobActive || coverRegenerating ? 'disabled' : ''}>
+            ${coverRegenerating ? 'Checking cover…' : 'Regenerate cover'}
           </button>
         </div>` : ''}
         <button class="delete-book" type="button" data-delete-id="${escapeHTML(book.id)}" aria-label="Remove ${escapeHTML(title)}" title="Remove book">×</button>
@@ -432,6 +437,25 @@ $('#books').addEventListener('click', async (event) => {
     openCoverReview(coverButton.dataset.coverReviewId);
     return;
   }
+  const regenerateButton = event.target.closest('[data-cover-regenerate-id]');
+  if (regenerateButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (regenerateButton.disabled) return;
+    regenerateButton.disabled = true;
+    regenerateButton.textContent = 'Queueing cover…';
+    try {
+      await api(`/api/books/${encodeURIComponent(regenerateButton.dataset.coverRegenerateId)}/cover-regenerate`, {
+        method: 'POST',
+      });
+      await loadBooks();
+    } catch (error) {
+      alert(error.message || 'Could not queue cover regeneration.');
+      regenerateButton.disabled = false;
+      regenerateButton.textContent = 'Regenerate cover';
+    }
+    return;
+  }
   const retranscribeButton = event.target.closest('[data-retranscribe-id]');
   if (retranscribeButton) {
     event.preventDefault();
@@ -472,7 +496,7 @@ $('#books').addEventListener('error', (event) => {
 
 function openCoverReview(bookID) {
   const book = shelfBooksByID.get(bookID);
-  if (!book?.cover_candidate_url) return;
+  if (!book?.cover_review_needed) return;
   coverReviewTarget = book;
   $('#coverReviewTitle').textContent = book.title || 'Book cover';
   $('#coverReviewMessage').textContent = '';
@@ -493,8 +517,25 @@ function openCoverReview(bookID) {
       <span class="cover-author">${escapeHTML(book.author || '')}</span>`;
   }
   const candidateImage = $('#coverReviewCandidateImage');
-  candidateImage.src = book.cover_candidate_url;
-  candidateImage.alt = `Suggested cover for ${book.title || 'book'}`;
+  const hasCatalog = Boolean(book.cover_candidate_url);
+  $('#coverReviewCatalogOption').hidden = !hasCatalog;
+  if (hasCatalog) {
+    candidateImage.src = book.cover_candidate_url;
+    candidateImage.alt = `Catalog cover suggestion for ${book.title || 'book'}`;
+    candidateImage.hidden = false;
+  } else {
+    candidateImage.removeAttribute('src');
+  }
+  const hasAI = Boolean(book.cover_ai_candidate_url);
+  $('#coverReviewAIOption').hidden = !hasAI;
+  const aiImage = $('#coverReviewAIImage');
+  if (hasAI) {
+    aiImage.src = book.cover_ai_candidate_url;
+    aiImage.alt = `Newly generated cover for ${book.title || 'book'}`;
+    aiImage.hidden = false;
+  } else {
+    aiImage.removeAttribute('src');
+  }
   const currentSource = book.cover_kind === 'epub'
     ? 'Imported EPUB'
     : book.cover_kind === 'audio'
@@ -506,12 +547,20 @@ function openCoverReview(bookID) {
   $('#coverReviewCurrentCaption').textContent = book.cover_kind === 'ai_svg'
     ? `AI-designed Readalong cover${currentYear ? ` · ${currentYear}` : ''}`
     : book.cover_kind ? [`Current cover · ${currentSource}`, currentYear].filter(Boolean).join(' · ') : 'Current Readalong design';
-  $('#coverReviewCandidateCaption').textContent = [
-    'Catalog suggestion',
-    coverProviderLabel(book.cover_candidate_provider),
-    book.cover_candidate_year ? `First published ${book.cover_candidate_year}` : '',
+  if (hasCatalog) {
+    $('#coverReviewCandidateCaption').textContent = [
+      'Catalog suggestion',
+      coverProviderLabel(book.cover_candidate_provider),
+      book.cover_candidate_year ? `First published ${book.cover_candidate_year}` : '',
+    ].filter(Boolean).join(' · ');
+  }
+  $('#coverReviewAICaption').textContent = [
+    'New Readalong SVG design',
+    book.cover_ai_candidate_year ? `First published ${book.cover_ai_candidate_year}` : '',
   ].filter(Boolean).join(' · ');
-  $('#keepCoverReview').textContent = book.cover_kind ? 'Keep current' : 'Decide later';
+  $('#keepCoverReview').textContent = book.cover_kind ? 'Keep current' : 'Not now';
+  $('#useCoverCandidate').hidden = !hasCatalog;
+  $('#useAICoverCandidate').hidden = !hasAI;
   $('#coverReviewDialog').showModal();
 }
 
@@ -533,6 +582,9 @@ $('#coverReviewDialog').addEventListener('error', (event) => {
   } else if (event.target.id === 'coverReviewCandidateImage') {
     event.target.hidden = true;
     $('#coverReviewCandidateCaption').textContent = 'Catalog suggestion preview is temporarily unavailable';
+  } else if (event.target.id === 'coverReviewAIImage') {
+    event.target.hidden = true;
+    $('#coverReviewAICaption').textContent = 'Readalong cover preview is temporarily unavailable';
   }
 }, true);
 $('#keepCoverReview').addEventListener('click', async () => {
@@ -543,10 +595,12 @@ $('#keepCoverReview').addEventListener('click', async () => {
   await saveCoverChoice('keep_current');
 });
 $('#useCoverCandidate').addEventListener('click', () => saveCoverChoice('use_candidate'));
+$('#useAICoverCandidate').addEventListener('click', () => saveCoverChoice('use_ai_candidate'));
 
 async function saveCoverChoice(action) {
   if (!coverReviewTarget) return;
-  const button = action === 'use_candidate' ? $('#useCoverCandidate') : $('#keepCoverReview');
+  const button = action === 'use_candidate' ? $('#useCoverCandidate')
+    : action === 'use_ai_candidate' ? $('#useAICoverCandidate') : $('#keepCoverReview');
   const message = $('#coverReviewMessage');
   button.disabled = true;
   message.textContent = 'Saving your cover choice…';
@@ -818,8 +872,13 @@ function formatBytes(bytes) {
 
 $('#coverAIModel').addEventListener('change', () => {
   const selected = coverAIModels.find((model) => model.id === $('#coverAIModel').value);
-  if (selected?.api_style) $('#coverAIAPIStyle').value = selected.api_style;
+  if (selected) $('#coverAIAPIStyle').value = 'auto';
   updateCoverAIModelInfo(selected);
+});
+
+$('#coverAIModelFilter').addEventListener('input', () => {
+  const selectedID = $('#coverAIModel').value;
+  populateCoverAIModelOptions(selectedID, selectedID);
 });
 
 $('#refreshCoverModels').addEventListener('click', async (event) => {
@@ -853,7 +912,12 @@ $('#checkCoverModel').addEventListener('click', async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model_id: modelID, api_style: $('#coverAIAPIStyle').value }),
     });
-    $('#coverAIStatus').textContent = `${result.healthy ? 'Healthy' : 'Check failed'} · ${result.message} (${result.latency_ms} ms)`;
+    if (result.healthy && $('#coverAIAPIStyle').value === 'auto') {
+      $('#coverAIAPIStyle').value = result.api_style;
+      $('#coverAIStatus').textContent = `${result.message} Auto-selected this format; save settings to keep it. (${result.latency_ms} ms)`;
+    } else {
+      $('#coverAIStatus').textContent = `${result.healthy ? 'Healthy' : 'Check failed'} · ${result.message} (${result.latency_ms} ms)`;
+    }
     $('#coverAIStatus').dataset.state = result.healthy ? 'success' : 'error';
   } catch (error) {
     $('#coverAIStatus').textContent = error.message || 'Could not check this model.';
@@ -897,32 +961,15 @@ async function loadCoverAISettings() {
   status.dataset.state = 'loading';
   try {
     const data = await api('/api/admin/cover-ai');
-    coverAIModels = (data.models || []).filter((model) => model.vision);
-    select.replaceChildren();
-    if (!coverAIModels.length) {
-      select.add(new Option('No vision or image-output models found', ''));
-    } else {
-      for (const model of coverAIModels) {
-        const prices = [
-          model.input_per_million == null ? '' : `$${Number(model.input_per_million).toFixed(3)}/1M input`,
-          model.output_per_million == null ? '' : `$${Number(model.output_per_million).toFixed(3)}/1M output`,
-        ].filter(Boolean).join(' · ');
-        const price = prices ? ` · ${prices}` : '';
-        select.add(new Option(`${model.provider ? `${model.provider} · ` : ''}${model.name} · ${model.api_style === 'responses' ? 'Responses' : 'Chat Completions'}${price}`, model.id));
-      }
-    }
-    select.disabled = !coverAIModels.length;
-    if (data.settings?.model_id && coverAIModels.some((model) => model.id === data.settings.model_id)) {
-      select.value = data.settings.model_id;
-    } else if (data.settings?.model_id) {
-      select.add(new Option(`${data.settings.model_id} · no longer in catalog`, data.settings.model_id));
-      select.value = data.settings.model_id;
-    }
-    $('#coverAIAPIStyle').value = data.settings?.api_style || coverAIModels.find((model) => model.id === select.value)?.api_style || 'responses';
+    coverAIModels = data.models || [];
+    const selectedID = data.settings?.model_id || '';
+    populateCoverAIModelOptions(selectedID, selectedID);
+    $('#coverAIAPIStyle').value = ['auto', 'responses', 'chat_completions'].includes(data.settings?.api_style)
+      ? data.settings.api_style : 'auto';
     $('#enableCoverAI').checked = Boolean(data.settings?.enabled);
     $('#enableCoverLookup').checked = data.settings?.catalog_lookup_enabled !== false;
     $('#includeCoverDescription').checked = data.settings?.use_book_description !== false;
-    $('#checkCoverModel').disabled = !select.value;
+    $('#checkCoverModel').disabled = !coverAIModels.some((model) => model.id === select.value && model.text_output);
     updateCoverAIModelInfo(coverAIModels.find((model) => model.id === select.value));
     if (data.warning) {
       status.textContent = data.warning;
@@ -943,17 +990,83 @@ async function loadCoverAISettings() {
   }
 }
 
+function populateCoverAIModelOptions(preferredID = $('#coverAIModel').value, requiredID = '') {
+  const select = $('#coverAIModel');
+  const query = $('#coverAIModelFilter').value.trim().toLowerCase();
+  const matches = coverAIModels.filter((model) => [
+    model.id, model.name, model.gateway, model.provider, model.description,
+  ].some((part) => String(part || '').toLowerCase().includes(query)));
+  select.replaceChildren();
+  if (!coverAIModels.length) {
+    select.add(new Option('No text-generation models discovered', ''));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  const groups = new Map();
+  for (const model of matches) {
+    const gateway = model.gateway || model.provider || 'Other managed models';
+    if (!groups.has(gateway)) {
+      const group = document.createElement('optgroup');
+      group.label = gateway;
+      select.append(group);
+      groups.set(gateway, group);
+    }
+    groups.get(gateway).append(modelOption(model));
+  }
+  const current = coverAIModels.find((model) => model.id === requiredID);
+  if (current && !matches.some((model) => model.id === current.id)) {
+    const group = document.createElement('optgroup');
+    group.label = 'Current selection';
+    group.append(modelOption(current));
+    select.append(group);
+  } else if (requiredID && !current) {
+    const group = document.createElement('optgroup');
+    group.label = 'Saved selection';
+    const unavailable = new Option(`${requiredID} · no longer in catalog`, requiredID);
+    group.append(unavailable);
+    select.append(group);
+  }
+  if (!matches.length && !requiredID) select.add(new Option('No models match this search', ''));
+  if (preferredID && [...select.options].some((option) => option.value === preferredID)) {
+    select.value = preferredID;
+  } else if (!query && matches.length) {
+    select.value = matches[0].id;
+  } else {
+    select.value = '';
+  }
+}
+
+function modelOption(model) {
+  const priceParts = [
+    model.input_per_million == null ? '' : `$${Number(model.input_per_million).toFixed(3)}/1M input`,
+    model.output_per_million == null ? '' : `$${Number(model.output_per_million).toFixed(3)}/1M output`,
+  ].filter(Boolean);
+  const price = priceParts.length ? priceParts.join(' · ')
+    : model.gateway === 'OpenAI via exe.dev' ? 'price not listed · account billed'
+      : 'price not listed';
+  const provider = model.provider && model.provider !== model.gateway ? `${model.provider} · ` : '';
+  const unverified = model.text_output_known ? '' : ' · check required';
+  const preference = model.api_style === 'responses' ? 'Responses preferred' : 'Chat preferred';
+  return new Option(`${provider}${model.name} · ${model.id} · ${preference} · ${price}${unverified}`, model.id);
+}
+
 function updateCoverAIModelInfo(model) {
   const info = $('#coverAIModelInfo');
   if (!model) {
-    info.textContent = 'The current model catalog marks vision input separately from image generation.';
+    info.textContent = 'Choose a text-generating model. Readalong renders the final, safely typeset cover as SVG.';
     $('#checkCoverModel').disabled = true;
     return;
   }
-  const capability = model.image_output
-    ? 'The catalog advertises image output, but Readalong currently uses its structured design recipe and local SVG renderer.'
-    : 'This model accepts image input, but does not advertise image output; Readalong renders its structured design as SVG.';
-  info.textContent = [model.description, capability].filter(Boolean).join(' ');
+  const capability = model.text_output_known
+    ? 'The catalog advertises text output; Readalong uses it for a structured design recipe.'
+    : 'This gateway does not publish text-capability metadata for this model; run Check model before enabling it.';
+  const optional = [
+    model.vision ? 'It also accepts image input, which this feature does not need.' : '',
+    model.image_output ? 'It also advertises native image output; Readalong currently renders SVG locally.' : '',
+    `Auto will try ${model.api_style === 'responses' ? 'Responses' : 'Chat Completions'} first.`,
+  ].filter(Boolean).join(' ');
+  info.textContent = [model.description, capability, optional].filter(Boolean).join(' ');
   $('#checkCoverModel').disabled = false;
 }
 

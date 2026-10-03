@@ -11,42 +11,54 @@ import (
 var ErrCoverTaskLeaseLost = errors.New("cover task lease expired")
 
 type CoverTask struct {
-	BookID           string
-	OwnerUserID      string
-	Title            string
-	Author           string
-	SourceKind       string
-	AudioRelPath     string
-	EpubRelPath      string
-	EbookJSONRelPath string
-	LocalScanNeeded  bool
-	EPUBAuthor       string
-	BookDescription  string
-	SelectedKind     string
-	SelectedRelPath  string
-	SelectedURL      string
-	NoMatchCount     int
-	FailureCount     int
-	LeaseUntil       string
+	BookID                string
+	OwnerUserID           string
+	Title                 string
+	Author                string
+	SourceKind            string
+	AudioRelPath          string
+	EpubRelPath           string
+	EbookJSONRelPath      string
+	LocalScanNeeded       bool
+	RegenerationRequested bool
+	EPUBAuthor            string
+	BookDescription       string
+	SelectedKind          string
+	SelectedRelPath       string
+	SelectedURL           string
+	SelectedYear          int
+	AICandidateRelPath    string
+	NoMatchCount          int
+	FailureCount          int
+	LeaseUntil            string
+}
+
+type CoverSuggestion struct {
+	URL       string
+	SourceURL string
+	Year      int
 }
 
 type BookCoverState struct {
-	Status            string
-	SelectedKind      string
-	SelectedRelPath   string
-	SelectedURL       string
-	SelectedProvider  string
-	SelectedYear      int
-	CandidateKind     string
-	CandidateRelPath  string
-	CandidateURL      string
-	CandidateProvider string
-	CandidateYear     int
-	LastCheckedAt     string
-	NextCheckAt       string
-	NoMatchCount      int
-	FailureCount      int
-	LookupPaused      bool
+	Status                string
+	SelectedKind          string
+	SelectedRelPath       string
+	SelectedURL           string
+	SelectedProvider      string
+	SelectedYear          int
+	CandidateKind         string
+	CandidateRelPath      string
+	CandidateURL          string
+	CandidateProvider     string
+	CandidateYear         int
+	AICandidateRelPath    string
+	AICandidateYear       int
+	RegenerationRequested bool
+	LastCheckedAt         string
+	NextCheckAt           string
+	NoMatchCount          int
+	FailureCount          int
+	LookupPaused          bool
 }
 
 type CoverLookupCache struct {
@@ -135,6 +147,60 @@ func (d *DB) BeginBookDeletion(ctx context.Context, ownerID, bookID string) erro
 	return tx.Commit()
 }
 
+func (d *DB) QueueCoverRegeneration(ctx context.Context, ownerID, bookID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists, jobActive, operationActive, deleting, leaseActive, regenerationActive int
+	if err := tx.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=? AND status='ready'),
+		EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND status IN ('queued','running')),
+		EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running')),
+		COALESCE((SELECT deleting FROM book_cover_state WHERE book_id=?),0),
+		EXISTS(SELECT 1 FROM book_cover_state WHERE book_id=? AND lease_until>?),
+		COALESCE((SELECT regeneration_requested FROM book_cover_state WHERE book_id=?),0)`,
+		bookID, ownerID, bookID, bookID, bookID, bookID, now, bookID).
+		Scan(&exists, &jobActive, &operationActive, &deleting, &leaseActive, &regenerationActive); err != nil {
+		return err
+	}
+	switch {
+	case exists == 0:
+		return ErrBookNotFound
+	case operationActive != 0:
+		return ErrBookOperationInProgress
+	case deleting != 0:
+		return ErrBookDeleteInProgress
+	case jobActive != 0:
+		return ErrBookJobInProgress
+	case leaseActive != 0 || regenerationActive != 0:
+		return ErrBookCoverInProgress
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE book_cover_state SET
+		candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,candidate_provider=NULL,candidate_year=0,
+		ai_candidate_relpath=NULL,ai_candidate_year=0,
+		regeneration_requested=1,local_scan_needed=0,lookup_paused=0,next_check_at=?,
+		no_match_count=0,failure_count=0,status='pending',updated_at=?
+		WHERE book_id=? AND deleting=0 AND (lease_until IS NULL OR lease_until<=?)
+			AND regeneration_requested=0
+			AND NOT EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND status IN ('queued','running'))
+			AND NOT EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running'))`,
+		now, now, bookID, now, bookID, bookID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrBookCoverInProgress
+	}
+	return tx.Commit()
+}
+
 func (d *DB) CancelBookDeletion(ctx context.Context, ownerID, bookID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.ExecContext(ctx, `UPDATE book_cover_state SET deleting=0,updated_at=?
@@ -201,7 +267,8 @@ func (d *DB) QueueLocalCoverScan(ctx context.Context, bookID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.ExecContext(ctx, `UPDATE book_cover_state SET local_scan_needed=1,next_check_at=?,status='pending',updated_at=?
 		WHERE book_id=? AND selected_kind='' AND lookup_paused=0
-		AND (candidate_url IS NULL OR candidate_url='') AND (candidate_relpath IS NULL OR candidate_relpath='')`,
+		AND (candidate_url IS NULL OR candidate_url='') AND (candidate_relpath IS NULL OR candidate_relpath='')
+		AND COALESCE(ai_candidate_relpath,'')=''`,
 		now, now, bookID)
 	return err
 }
@@ -233,13 +300,15 @@ func (d *DB) ClaimNextCoverTask(ctx context.Context, now, leaseUntil string) (Co
 	err = tx.QueryRowContext(ctx, `SELECT b.id,b.owner_user_id,b.title,b.author,b.source_kind,
 		COALESCE(b.audio_relpath,''),COALESCE(b.epub_relpath,''),COALESCE(b.ebook_json_relpath,''),
 		c.local_scan_needed,
-		COALESCE(c.selected_kind,''),COALESCE(c.selected_relpath,''),COALESCE(c.selected_url,''),
+		c.regeneration_requested,COALESCE(c.selected_kind,''),COALESCE(c.selected_relpath,''),
+		COALESCE(c.selected_url,''),c.selected_year,COALESCE(c.ai_candidate_relpath,''),
 		c.no_match_count,c.failure_count
 		FROM book_cover_state c JOIN books b ON b.id=c.book_id
 		WHERE b.status IN ('ready','error') AND c.deleting=0 AND c.lookup_paused=0
-			AND (c.local_scan_needed=1 OR (c.next_check_at IS NOT NULL AND c.next_check_at<=?))
+			AND (c.regeneration_requested=1 OR c.local_scan_needed=1 OR (c.next_check_at IS NOT NULL AND c.next_check_at<=?))
 			AND (c.lease_until IS NULL OR c.lease_until<=?)
 			AND COALESCE(c.candidate_url,'')='' AND COALESCE(c.candidate_relpath,'')=''
+			AND COALESCE(c.ai_candidate_relpath,'')=''
 			AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running'))
 			AND (b.mode<>'aligned' OR COALESCE(b.epub_relpath,'')<>'' OR NOT EXISTS(
 				SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running')))
@@ -248,8 +317,8 @@ func (d *DB) ClaimNextCoverTask(ctx context.Context, now, leaseUntil string) (Co
 		ORDER BY c.next_check_at,b.created_at LIMIT 1`, now, now).
 		Scan(&task.BookID, &task.OwnerUserID, &task.Title, &task.Author, &task.SourceKind,
 			&task.AudioRelPath, &task.EpubRelPath, &task.EbookJSONRelPath,
-			&task.LocalScanNeeded,
-			&task.SelectedKind, &task.SelectedRelPath, &task.SelectedURL,
+			&task.LocalScanNeeded, &task.RegenerationRequested, &task.SelectedKind,
+			&task.SelectedRelPath, &task.SelectedURL, &task.SelectedYear, &task.AICandidateRelPath,
 			&task.NoMatchCount, &task.FailureCount)
 	if err == sql.ErrNoRows {
 		return CoverTask{}, false, nil
@@ -288,7 +357,8 @@ func (d *DB) SetCoverNoMatch(ctx context.Context, task CoverTask, checkedAt, nex
 func (d *DB) SetCoverLookupFailure(ctx context.Context, task CoverTask, checkedAt, nextCheckAt string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status=CASE WHEN selected_kind='' THEN 'error' ELSE 'selected' END,
-		local_scan_needed=0,last_checked_at=?,next_check_at=?,failure_count=failure_count+1,lease_until=NULL,updated_at=?
+		local_scan_needed=0,regeneration_requested=0,last_checked_at=?,next_check_at=?,
+		failure_count=failure_count+1,lease_until=NULL,updated_at=?
 		WHERE book_id=? AND lease_until=? AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		checkedAt, nextCheckAt, now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
 	return requireCoverLease(result, err)
@@ -334,6 +404,44 @@ func (d *DB) SetCoverCandidate(ctx context.Context, task CoverTask, coverURL, so
 	return requireCoverLease(result, err)
 }
 
+func (d *DB) SetCoverRegenerationResults(ctx context.Context, task CoverTask,
+	suggestion *CoverSuggestion, aiRelPath string, aiYear int, checkedAt, nextCheckAt string,
+	lookupResult string,
+) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	switch lookupResult {
+	case "", "found", "missing", "failed", "rate_limited":
+	default:
+		return fmt.Errorf("invalid cover lookup result")
+	}
+	candidateKind, candidateURL, candidateProvider := "", any(nil), any(nil)
+	candidateYear := 0
+	if suggestion != nil && suggestion.URL != "" {
+		candidateKind, candidateURL, candidateProvider = "catalog", nullableString(suggestion.URL), nullableString(suggestion.SourceURL)
+		candidateYear = suggestion.Year
+	}
+	next := nullableString(nextCheckAt)
+	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET
+		status=CASE WHEN ?<>'' OR ?<>'' THEN 'review'
+			WHEN selected_kind='' AND ?='failed' THEN 'error'
+			WHEN selected_kind='' THEN 'missing' ELSE 'selected' END,
+		candidate_kind=?,candidate_relpath=NULL,candidate_url=?,candidate_provider=?,candidate_year=?,
+		ai_candidate_relpath=?,ai_candidate_year=?,
+		regeneration_requested=0,local_scan_needed=0,lookup_paused=0,
+		last_checked_at=?,next_check_at=?,
+		no_match_count=CASE WHEN ?='found' THEN 0 WHEN ?='missing' THEN no_match_count+1 ELSE no_match_count END,
+		failure_count=CASE WHEN ? IN ('found','missing') THEN 0 WHEN ?='failed' THEN failure_count+1 ELSE failure_count END,
+		lease_until=NULL,updated_at=?
+		WHERE book_id=? AND lease_until=?
+			AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
+		candidateKind, aiRelPath, lookupResult,
+		candidateKind, candidateURL, candidateProvider, candidateYear,
+		nullableString(aiRelPath), aiYear, checkedAt, next,
+		lookupResult, lookupResult, lookupResult, lookupResult,
+		now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
+	return requireCoverLease(result, err)
+}
+
 func (d *DB) SetGeneratedCover(ctx context.Context, task CoverTask, relPath string, nextCheckAt string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status='selected',selected_kind='ai_svg',
@@ -356,7 +464,7 @@ func (d *DB) PauseCoverTask(ctx context.Context, task CoverTask) error {
 func (d *DB) RetryCoverTaskAt(ctx context.Context, task CoverTask, nextCheckAt string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status=CASE WHEN selected_kind='' THEN 'pending' ELSE 'selected' END,
-		local_scan_needed=0,next_check_at=?,lease_until=NULL,updated_at=? WHERE book_id=? AND lease_until=?
+		local_scan_needed=0,regeneration_requested=0,next_check_at=?,lease_until=NULL,updated_at=? WHERE book_id=? AND lease_until=?
 		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		nextCheckAt, now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
 	return requireCoverLease(result, err)
@@ -390,7 +498,8 @@ func (d *DB) RequeueUnscheduledCoverLookups(ctx context.Context) error {
 		WHEN selected_kind='' THEN 'pending' ELSE 'selected' END,updated_at=?
 		WHERE lookup_paused=0 AND next_check_at IS NULL
 			AND (candidate_url IS NULL OR candidate_url='')
-			AND (candidate_relpath IS NULL OR candidate_relpath='')`, now, now)
+			AND (candidate_relpath IS NULL OR candidate_relpath='')
+			AND COALESCE(ai_candidate_relpath,'')=''`, now, now)
 	return err
 }
 
@@ -400,13 +509,15 @@ func (d *DB) CoverStateForUser(ctx context.Context, ownerID, bookID string) (Boo
 	err := d.QueryRowContext(ctx, `SELECT c.status,COALESCE(c.selected_kind,''),COALESCE(c.selected_relpath,''),
 		COALESCE(c.selected_url,''),COALESCE(c.selected_provider,''),c.selected_year,
 		COALESCE(c.candidate_kind,''),COALESCE(c.candidate_relpath,''),COALESCE(c.candidate_url,''),
-		COALESCE(c.candidate_provider,''),c.candidate_year,COALESCE(c.last_checked_at,''),
+		COALESCE(c.candidate_provider,''),c.candidate_year,COALESCE(c.ai_candidate_relpath,''),
+		c.ai_candidate_year,c.regeneration_requested,COALESCE(c.last_checked_at,''),
 		COALESCE(c.next_check_at,''),c.no_match_count,c.failure_count,c.lookup_paused
 		FROM book_cover_state c JOIN books b ON b.id=c.book_id
 		WHERE b.owner_user_id=? AND b.id=?`, ownerID, bookID).
 		Scan(&state.Status, &state.SelectedKind, &state.SelectedRelPath, &state.SelectedURL,
 			&state.SelectedProvider, &state.SelectedYear, &state.CandidateKind, &state.CandidateRelPath,
-			&state.CandidateURL, &state.CandidateProvider, &state.CandidateYear,
+			&state.CandidateURL, &state.CandidateProvider, &state.CandidateYear, &state.AICandidateRelPath,
+			&state.AICandidateYear, &state.RegenerationRequested,
 			&state.LastCheckedAt, &state.NextCheckAt, &state.NoMatchCount, &state.FailureCount, &paused)
 	if err != nil {
 		return BookCoverState{}, ErrBookNotFound
@@ -415,27 +526,44 @@ func (d *DB) CoverStateForUser(ctx context.Context, ownerID, bookID string) (Boo
 	return state, nil
 }
 
-func (d *DB) ChooseCoverCandidate(ctx context.Context, ownerID, bookID string, chooseCandidate bool) error {
+func (d *DB) ChooseCoverCandidate(ctx context.Context, ownerID, bookID, action string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var query string
-	if chooseCandidate {
+	switch action {
+	case "use_candidate":
 		query = `UPDATE book_cover_state SET
 			selected_kind=candidate_kind,selected_relpath=candidate_relpath,selected_url=candidate_url,
 			selected_provider=candidate_provider,selected_year=candidate_year,
 			candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,candidate_provider=NULL,candidate_year=0,
+			ai_candidate_relpath=NULL,ai_candidate_year=0,
 			status='selected',lookup_paused=1,next_check_at=NULL,lease_until=NULL,updated_at=?
 			WHERE book_id=? AND (candidate_url IS NOT NULL OR candidate_relpath IS NOT NULL)
 				AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)
 				AND deleting=0
 				AND NOT EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running'))`
-	} else {
-		query = `UPDATE book_cover_state SET candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,
-			candidate_provider=NULL,candidate_year=0,status=CASE WHEN selected_kind='' THEN 'missing' ELSE 'selected' END,
-			lookup_paused=1,next_check_at=NULL,lease_until=NULL,updated_at=?
-			WHERE book_id=? AND (candidate_url IS NOT NULL OR candidate_relpath IS NOT NULL)
+	case "use_ai_candidate":
+		query = `UPDATE book_cover_state SET
+			selected_kind='ai_svg',selected_relpath=ai_candidate_relpath,selected_url=NULL,
+			selected_provider='Readalong vector art',selected_year=ai_candidate_year,
+			candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,candidate_provider=NULL,candidate_year=0,
+			ai_candidate_relpath=NULL,ai_candidate_year=0,
+			status='selected',lookup_paused=1,next_check_at=NULL,lease_until=NULL,updated_at=?
+			WHERE book_id=? AND COALESCE(ai_candidate_relpath,'')<>''
 				AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)
 				AND deleting=0
 				AND NOT EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running'))`
+	case "keep_current":
+		query = `UPDATE book_cover_state SET candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,
+			candidate_provider=NULL,candidate_year=0,status=CASE WHEN selected_kind='' THEN 'missing' ELSE 'selected' END,
+			ai_candidate_relpath=NULL,ai_candidate_year=0,
+			lookup_paused=1,next_check_at=NULL,lease_until=NULL,updated_at=?
+			WHERE book_id=? AND (candidate_url IS NOT NULL OR candidate_relpath IS NOT NULL OR
+				COALESCE(ai_candidate_relpath,'')<>'')
+				AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)
+				AND deleting=0
+				AND NOT EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running'))`
+	default:
+		return fmt.Errorf("invalid cover choice")
 	}
 	result, err := d.ExecContext(ctx, query, now, bookID, bookID, ownerID, bookID)
 	if err != nil {

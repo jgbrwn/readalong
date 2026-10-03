@@ -30,6 +30,7 @@ type AdminBookOperation struct {
 type BookArtifactPaths struct {
 	Audio, EPUB, EbookJSON, Transcript, Alignment string
 	CoverSelected, CoverCandidate                 string
+	CoverAICandidate                              string
 }
 
 func (d *DB) CloneReadyBookForAdmin(ctx context.Context, operation AdminBookOperation, paths BookArtifactPaths) error {
@@ -115,11 +116,13 @@ func (d *DB) CloneReadyBookForAdmin(ctx context.Context, operation AdminBookOper
 	if err := tx.QueryRowContext(ctx, `SELECT status,selected_kind,COALESCE(selected_relpath,''),
 		COALESCE(selected_url,''),COALESCE(selected_provider,''),selected_year,candidate_kind,
 		COALESCE(candidate_relpath,''),COALESCE(candidate_url,''),COALESCE(candidate_provider,''),
-		candidate_year,COALESCE(last_checked_at,''),COALESCE(next_check_at,''),no_match_count,
+		candidate_year,COALESCE(ai_candidate_relpath,''),ai_candidate_year,
+		COALESCE(last_checked_at,''),COALESCE(next_check_at,''),no_match_count,
 		failure_count,lookup_paused FROM book_cover_state WHERE book_id=?`, operation.BookID).
 		Scan(&cover.Status, &cover.SelectedKind, &cover.SelectedRelPath, &cover.SelectedURL,
 			&cover.SelectedProvider, &cover.SelectedYear, &cover.CandidateKind, &cover.CandidateRelPath,
 			&cover.CandidateURL, &cover.CandidateProvider, &cover.CandidateYear,
+			&cover.AICandidateRelPath, &cover.AICandidateYear,
 			&cover.LastCheckedAt, &cover.NextCheckAt, &cover.NoMatchCount, &cover.FailureCount, &lookupPaused); err != nil {
 		if err != sql.ErrNoRows {
 			return err
@@ -132,12 +135,14 @@ func (d *DB) CloneReadyBookForAdmin(ctx context.Context, operation AdminBookOper
 		if _, err := tx.ExecContext(ctx, `INSERT INTO book_cover_state
 			(book_id,status,selected_kind,selected_relpath,selected_url,selected_provider,selected_year,
 			 candidate_kind,candidate_relpath,candidate_url,candidate_provider,candidate_year,last_checked_at,
-			 next_check_at,no_match_count,failure_count,lookup_paused,lease_until,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`,
+			 ai_candidate_relpath,ai_candidate_year,next_check_at,no_match_count,failure_count,
+			 lookup_paused,regeneration_requested,lease_until,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,0,NULL,?)`,
 			operation.TargetBookID, status, cover.SelectedKind, nullableString(paths.CoverSelected),
 			nullableString(cover.SelectedURL), nullableString(cover.SelectedProvider), cover.SelectedYear,
 			cover.CandidateKind, nullableString(paths.CoverCandidate), nullableString(cover.CandidateURL),
 			nullableString(cover.CandidateProvider), cover.CandidateYear, nullableString(cover.LastCheckedAt),
+			nullableString(paths.CoverAICandidate), cover.AICandidateYear,
 			nullableString(cover.NextCheckAt), cover.NoMatchCount, cover.FailureCount, lookupPaused, now); err != nil {
 			return err
 		}
@@ -183,9 +188,9 @@ func (d *DB) TransferReadyBookForAdmin(ctx context.Context, operation AdminBookO
 		operation.TargetOwnerUserID, operation.BookID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE book_cover_state SET selected_relpath=?,candidate_relpath=?,
+	if _, err := tx.ExecContext(ctx, `UPDATE book_cover_state SET selected_relpath=?,candidate_relpath=?,ai_candidate_relpath=?,
 		lease_until=NULL,updated_at=? WHERE book_id=?`, nullableString(paths.CoverSelected),
-		nullableString(paths.CoverCandidate), now, operation.BookID); err != nil {
+		nullableString(paths.CoverCandidate), nullableString(paths.CoverAICandidate), now, operation.BookID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -357,9 +362,9 @@ func (d *DB) RollbackAdminBookTransfer(ctx context.Context, operation AdminBookO
 		operation.SourceOwnerUserID, operation.BookID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE book_cover_state SET selected_relpath=?,candidate_relpath=?,
+	if _, err := tx.ExecContext(ctx, `UPDATE book_cover_state SET selected_relpath=?,candidate_relpath=?,ai_candidate_relpath=?,
 		updated_at=? WHERE book_id=?`, nullableString(paths.CoverSelected),
-		nullableString(paths.CoverCandidate), now, operation.BookID); err != nil {
+		nullableString(paths.CoverCandidate), nullableString(paths.CoverAICandidate), now, operation.BookID); err != nil {
 		return err
 	}
 	return tx.Commit()

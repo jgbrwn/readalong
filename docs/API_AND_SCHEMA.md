@@ -73,12 +73,13 @@ Composite primary key `(user_id, book_id)`.
 
 ### book_cover_state
 
-One owner-book row tracks the selected cover and any review candidate:
+One owner-book row tracks the selected cover, catalog suggestion, generated
+cover suggestion, and any user-triggered regeneration request:
 
-- selected/candidate artifact paths or catalog URLs and provider provenance;
+- selected/catalog/AI-candidate artifact paths or catalog URLs and provenance;
 - state (`pending`, `checking`, `missing`, `selected`, or `review`);
 - last/next check, negative-result count, provider-failure count, lookup pause,
-  and an expiring lease for the cover worker.
+  regeneration flag, and an expiring lease for the cover worker.
 
 Existing books are backfilled on migration; new imports get a pending row.
 Generated/EPUB cover files live under the book's owner-scoped directory.
@@ -109,8 +110,9 @@ GET    /api/books/:id
 DELETE /api/books/:id
 GET    /api/books/:id/reader       transcript/ebook window; content=transcript|ebook
 GET    /api/books/:id/audio        Range-capable local media response
-GET    /api/books/:id/cover/selected|candidate   owner-checked local cover image
+GET    /api/books/:id/cover/selected|candidate|ai-candidate  owner-checked image
 POST   /api/books/:id/cover-choice
+POST   /api/books/:id/cover-regenerate
 GET    /api/books/:id/events       SSE processing progress
 PUT    /api/books/:id/progress
 POST   /api/books/:id/retry
@@ -151,23 +153,29 @@ failures use separate exponential backoff. High-confidence catalog matches can
 be selected when no cover exists; uncertain results are review candidates. A
 candidate never silently replaces a generated cover.
 
-`POST /api/books/:id/cover-choice` accepts `{"action":"use_candidate"}` or
-`{"action":"keep_current"}`. Choosing the generated/current cover pauses
-automatic catalog lookup; choosing a catalog candidate also pauses further
-automatic checks.
+`POST /api/books/:id/cover-choice` accepts `use_candidate` (catalog),
+`use_ai_candidate`, or `keep_current`. Each explicit choice pauses automatic
+replacement/lookup; “Not now” leaves suggestions available for later review.
+`POST /api/books/:id/cover-regenerate` queues a fresh catalog check and, when
+enabled, a new AI design. The current cover remains selected until the owner
+chooses among the current cover and returned suggestions.
 
-Admin cover settings discover/caches managed LLM models through Reflection.
-The inventory distinguishes image-input `vision` from advertised image
-output. The current vector-cover renderer asks the selected model for a small
-structured art direction and renders the SVG locally; it does not treat a
-vision model as a raster image generator. The model check sends a small,
-potentially billable inference request through that model's configured
-Responses or Chat Completions API. `GET` serves the six-hour cached inventory;
+Admin cover settings discover/cache text-output models through Reflection,
+including OpenAI/ChatGPT, Neuralwatt, and OpenRouter entries. Models without
+explicit text-output metadata are shown as inferred candidates and require a
+health check. Vision
+means image input, not image output; neither is required for the recipe-based
+local SVG renderer. The model check defaults to Auto: it tries the catalog's
+preferred Responses or Chat Completions endpoint and tries the alternate after
+an endpoint rejection or an accepted response without a valid design recipe.
+It does not retry authentication, billing, rate-limit, refusal, or truncation
+failures. Responses streaming and Chat Completions text formats are both
+parsed. `GET` serves the six-hour cached inventory;
 `POST /api/admin/cover-ai/refresh` refreshes it. `PUT` saves the global catalog
 lookup switch, description-sharing preference, model ID, API style, and
 optional generation switch. The health check is explicit and rate-limited per
-model; model listing itself never runs inference. A check may consume a small
-amount of the selected model's provider quota.
+model; model listing itself never runs inference. Checks and generated designs
+can consume provider quota.
 
 ### Admin book operations
 

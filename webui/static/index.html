@@ -72,20 +72,22 @@
       </section>
       <section id="adminCoverAI" class="admin-section" hidden>
         <h2>Cover artwork model</h2>
-        <p class="muted">Readalong discovers available models through the VM’s managed LLM integration. “Vision” means image input, not image output. This version asks the selected model for a structured cover design and renders a safe SVG locally. Cover design sends only title, author, short EPUB description metadata (if present), and a verified year—not audio or chapter text.</p>
+        <p class="muted">Readalong discovers text-generating models through the VM’s managed LLM integration. The model returns a small design recipe; Readalong renders the SVG locally, so vision or native image generation is not required. Cover design sends only title, author, short EPUB description metadata (if present), and a verified year—not audio or chapter text.</p>
         <div class="cover-ai-controls">
           <label class="admin-checkbox">
             <input id="enableCoverLookup" type="checkbox">
             <span>Automatically search public catalogs for covers. Only book title and author are sent; audio and ebook contents are not. Cover images load directly from Open Library when shown.</span>
           </label>
-          <label for="coverAIModel">Vision-capable design model</label>
+          <label for="coverAIModelFilter">Find a design model</label>
+          <input id="coverAIModelFilter" type="search" placeholder="Search model or provider" autocomplete="off">
           <select id="coverAIModel" disabled><option value="">Refresh models to choose</option></select>
           <label for="coverAIAPIStyle">API format</label>
           <select id="coverAIAPIStyle">
+            <option value="auto">Auto-detect (recommended)</option>
             <option value="responses">Responses API</option>
             <option value="chat_completions">Chat Completions API</option>
           </select>
-          <p class="fine-print">Readalong infers the API format from model metadata/provider where possible. If “Check model” reports an endpoint mismatch, try the other format.</p>
+          <p class="fine-print">Auto tries the preferred endpoint, then the alternate if needed. It does not retry authentication, billing, rate-limit, refusal, or truncated-output failures. A successful check selects the working API format; save settings to keep it.</p>
           <p id="coverAIModelInfo" class="muted"></p>
           <p class="fine-print">“Check model” sends a tiny request to the selected provider. It can consume a small amount of quota and can reveal rate limits or credit exhaustion.</p>
           <div class="admin-actions">
@@ -173,24 +175,29 @@
   <dialog id="coverReviewDialog" class="sheet cover-review-sheet">
     <div class="cover-review-content">
       <button type="button" class="close-button" id="closeCoverReview" aria-label="Close">×</button>
-      <p class="eyebrow">A CATALOG COVER WAS FOUND</p>
+      <p class="eyebrow">COVER OPTIONS</p>
       <h2 id="coverReviewTitle"></h2>
-      <p class="muted">Compare the current cover with this catalog suggestion. Readalong will not replace your selected cover without your choice.</p>
+      <p class="muted">Choose the current cover, a catalog cover, or a freshly designed Readalong cover. Nothing replaces your selection without your choice.</p>
       <div class="cover-compare">
         <figure>
           <img id="coverReviewCurrentImage" alt="">
           <div id="coverReviewCurrentFallback" class="book-cover cover-2" hidden></div>
           <figcaption id="coverReviewCurrentCaption">Current cover</figcaption>
         </figure>
-        <figure>
+        <figure id="coverReviewCatalogOption" hidden>
           <img id="coverReviewCandidateImage" alt="">
           <figcaption id="coverReviewCandidateCaption">Open Library suggestion</figcaption>
+        </figure>
+        <figure id="coverReviewAIOption" hidden>
+          <img id="coverReviewAIImage" alt="">
+          <figcaption id="coverReviewAICaption">New Readalong design</figcaption>
         </figure>
       </div>
       <p id="coverReviewMessage" class="form-message" role="status"></p>
       <div class="cover-review-actions">
         <button type="button" class="button button-quiet" id="keepCoverReview">Keep current</button>
-        <button type="button" class="button" id="useCoverCandidate">Use catalog cover</button>
+        <button type="button" class="button button-quiet" id="useCoverCandidate" hidden>Use catalog cover</button>
+        <button type="button" class="button" id="useAICoverCandidate" hidden>Use AI cover</button>
       </div>
     </div>
   </dialog>

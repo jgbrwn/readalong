@@ -64,7 +64,7 @@ func TestCoverWorkerClaimLeaseAndCandidateChoice(t *testing.T) {
 		"https://openlibrary.org/works/OL77W", 1920); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "cover-book", true); err != nil {
+	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "cover-book", "use_candidate"); err != nil {
 		t.Fatal(err)
 	}
 	state, err := d.CoverStateForUser(ctx, "cover-owner", "cover-book")
@@ -72,6 +72,95 @@ func TestCoverWorkerClaimLeaseAndCandidateChoice(t *testing.T) {
 		state.SelectedURL != "https://covers.openlibrary.org/b/id/77-M.jpg?default=false" ||
 		state.CandidateURL != "" || !state.LookupPaused {
 		t.Fatalf("selected cover state=%#v err=%v", state, err)
+	}
+}
+
+func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "cover-owner", "cover@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "regenerate-book", JobID: "regenerate-job", OwnerUserID: "cover-owner",
+		Title: "Regenerate Me", SourceKind: "upload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE books SET status='ready',audio_relpath='books/cover-owner/regenerate-book/playback.mp3',
+		transcript_relpath='books/cover-owner/regenerate-book/transcript.json.gz' WHERE id='regenerate-book'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE jobs SET status='completed',stage='ready',progress=1 WHERE id='regenerate-job'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE book_cover_state SET
+		status='selected',selected_kind='ai_svg',selected_relpath='books/cover-owner/regenerate-book/cover/generated.svg',
+		selected_provider='Readalong vector art',selected_year=1930,lookup_paused=1 WHERE book_id='regenerate-book'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueueCoverRegeneration(ctx, "cover-owner", "regenerate-book"); err != nil {
+		t.Fatal(err)
+	}
+	book, err := d.BookForUser(ctx, "cover-owner", "regenerate-book")
+	if err != nil || !book.CoverRegenerationQueued || book.CoverKind != "ai_svg" ||
+		book.CoverURL != "/api/books/regenerate-book/cover/selected" {
+		t.Fatalf("queued regeneration did not preserve the selected cover: book=%#v err=%v", book, err)
+	}
+	now := time.Now().UTC()
+	task, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !task.RegenerationRequested || task.SelectedKind != "ai_svg" ||
+		task.SelectedYear != 1930 {
+		t.Fatalf("regeneration task=%#v found=%v err=%v", task, found, err)
+	}
+	if err := d.SetCoverRegenerationResults(ctx, task, &CoverSuggestion{
+		URL:       "https://covers.openlibrary.org/b/id/99-M.jpg",
+		SourceURL: "https://openlibrary.org/works/OL99W", Year: 1935,
+	}, "books/cover-owner/regenerate-book/cover/generated-new.svg", 1935,
+		now.Format(time.RFC3339), "", "found"); err != nil {
+		t.Fatal(err)
+	}
+	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
+	if err != nil || !book.CoverReviewNeeded ||
+		book.CoverCandidateURL != "https://covers.openlibrary.org/b/id/99-M.jpg" ||
+		book.CoverAICandidateURL != "/api/books/regenerate-book/cover/ai-candidate" ||
+		book.CoverAICandidateYear != 1935 || book.CoverURL != "/api/books/regenerate-book/cover/selected" {
+		t.Fatalf("manual regeneration did not expose both choices: book=%#v err=%v", book, err)
+	}
+	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "regenerate-book", "use_ai_candidate"); err != nil {
+		t.Fatal(err)
+	}
+	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
+	if err != nil || book.CoverKind != "ai_svg" ||
+		book.CoverURL != "/api/books/regenerate-book/cover/selected" ||
+		book.CoverReviewNeeded || book.CoverAICandidateURL != "" {
+		t.Fatalf("new AI cover was not selected cleanly: book=%#v err=%v", book, err)
+	}
+
+	if err := d.QueueCoverRegeneration(ctx, "cover-owner", "regenerate-book"); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err = d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(2*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !task.RegenerationRequested {
+		t.Fatalf("second regeneration task=%#v found=%v err=%v", task, found, err)
+	}
+	if err := d.SetCoverRegenerationResults(ctx, task, &CoverSuggestion{
+		URL:       "https://covers.openlibrary.org/b/id/100-M.jpg",
+		SourceURL: "https://openlibrary.org/works/OL100W", Year: 1936,
+	}, "books/cover-owner/regenerate-book/cover/generated-newer.svg", 1936,
+		now.Format(time.RFC3339), "", "found"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "regenerate-book", "use_candidate"); err != nil {
+		t.Fatal(err)
+	}
+	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
+	if err != nil || book.CoverKind != "catalog" ||
+		book.CoverURL != "https://covers.openlibrary.org/b/id/100-M.jpg" ||
+		book.CoverReviewNeeded || book.CoverAICandidateURL != "" {
+		t.Fatalf("catalog cover was not selected cleanly: book=%#v err=%v", book, err)
 	}
 }
 

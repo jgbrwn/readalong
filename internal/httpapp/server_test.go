@@ -101,7 +101,7 @@ func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
 	registry := &fakeCoverModelRegistry{
 		models: []coverai.Model{{
 			ID: "neuralwatt/qwen-vision", Name: "Qwen vision", Provider: "Neuralwatt",
-			APIStyle: coverai.APIChat, Vision: true,
+			APIStyle: coverai.APIChat, Vision: true, TextOutput: true,
 		}},
 		check: coverai.CheckResult{
 			Healthy: true, Message: "Model is responding.", APIStyle: coverai.APIChat, LatencyMS: 15,
@@ -116,6 +116,15 @@ func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
+	legacySettings, err := json.Marshal(coverai.Settings{
+		Enabled: true, ModelID: "neuralwatt/qwen-vision", APIStyle: coverai.APIResponses,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetAppSetting(context.Background(), coverAISettingsKey, string(legacySettings)); err != nil {
+		t.Fatal(err)
+	}
 	handler := newWithCatalogAndCoverAI(cfg, d, nil, registry)
 
 	denied := request(handler, http.MethodGet, "/api/admin/cover-ai", "reader-id", "reader@example.org", "")
@@ -123,7 +132,8 @@ func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
 		t.Fatalf("non-admin cover settings status = %d", denied.Code)
 	}
 	admin := request(handler, http.MethodGet, "/api/admin/cover-ai", "admin-id", "admin@example.org", "")
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"neuralwatt/qwen-vision"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"neuralwatt/qwen-vision"`) ||
+		!strings.Contains(admin.Body.String(), `"api_style":"auto"`) {
 		t.Fatalf("admin cover model catalog = %d: %s", admin.Code, admin.Body)
 	}
 
@@ -145,6 +155,36 @@ func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
 	}
 	if registry.lastID != "neuralwatt/qwen-vision" || registry.lastAPI != coverai.APIChat {
 		t.Fatalf("wrong model check route: id=%q api=%q", registry.lastID, registry.lastAPI)
+	}
+}
+
+func TestOwnerCanQueueCoverRegenerationAndCannotQueueDuplicates(t *testing.T) {
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound}
+	d, handler := testServer(t, cfg)
+	_ = request(handler, http.MethodGet, "/api/me", "cover-user", "reader@example.org", "")
+	if err := d.CreateBookAndJob(context.Background(), db.NewBook{
+		ID: "cover-regenerate", JobID: "cover-regenerate-job", OwnerUserID: "cover-user",
+		Title: "A Book", Author: "An Author", SourceKind: "upload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteJob(context.Background(), "cover-regenerate-job"); err != nil {
+		t.Fatal(err)
+	}
+	response := request(handler, http.MethodPost, "/api/books/cover-regenerate/cover-regenerate",
+		"cover-user", "reader@example.org", "")
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"cover_regeneration_queued":true`) {
+		t.Fatalf("cover regeneration queue = %d: %s", response.Code, response.Body)
+	}
+	duplicate := request(handler, http.MethodPost, "/api/books/cover-regenerate/cover-regenerate",
+		"cover-user", "reader@example.org", "")
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate cover regeneration = %d: %s", duplicate.Code, duplicate.Body)
+	}
+	outsider := request(handler, http.MethodPost, "/api/books/cover-regenerate/cover-regenerate",
+		"other-user", "other@example.org", "")
+	if outsider.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner cover regeneration = %d: %s", outsider.Code, outsider.Body)
 	}
 }
 
@@ -231,21 +271,32 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 	}
 	coverDir := pipeline.BookDirectory(cfg.Normalize().DataDir, "cover-owner", "cover-book")
 	coverPath := filepath.Join(coverDir, "cover", "generated.svg")
-	if err := os.MkdirAll(filepath.Dir(coverPath), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(coverPath, []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), 0600); err != nil {
-		t.Fatal(err)
+	aiCandidatePath := filepath.Join(coverDir, "cover", "generated-review.svg")
+	for path, body := range map[string]string{
+		coverPath:       `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+		aiCandidatePath: `<svg xmlns="http://www.w3.org/2000/svg"><text>candidate</text></svg>`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	relative, err := filepath.Rel(cfg.Normalize().DataDir, coverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aiRelative, err := filepath.Rel(cfg.Normalize().DataDir, aiCandidatePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ExecContext(context.Background(), `UPDATE book_cover_state SET status='review',
 		selected_kind='ai_svg',selected_relpath=?,selected_provider='Readalong vector art',
 		candidate_kind='catalog',candidate_url='https://covers.openlibrary.org/b/id/77-M.jpg?default=false',
-		candidate_provider='https://openlibrary.org/works/OL77W',candidate_year=1920
-		WHERE book_id='cover-book'`, relative); err != nil {
+		candidate_provider='https://openlibrary.org/works/OL77W',candidate_year=1920,
+		ai_candidate_relpath=?,ai_candidate_year=1935
+		WHERE book_id='cover-book'`, relative, aiRelative); err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,9 +308,17 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 	if outsiderCover.Code != http.StatusNotFound {
 		t.Fatalf("other user cover status=%d", outsiderCover.Code)
 	}
+	ownerAICandidate := request(handler, http.MethodGet, "/api/books/cover-book/cover/ai-candidate",
+		"cover-owner", "owner@example.org", "")
+	outsiderAICandidate := request(handler, http.MethodGet, "/api/books/cover-book/cover/ai-candidate",
+		"cover-outsider", "other@example.org", "")
+	if ownerAICandidate.Code != http.StatusOK || outsiderAICandidate.Code != http.StatusNotFound {
+		t.Fatalf("AI candidate access owner=%d outsider=%d", ownerAICandidate.Code, outsiderAICandidate.Code)
+	}
 	books, err := d.BooksForUser(context.Background(), "cover-owner")
 	if err != nil || len(books) != 1 || !books[0].CoverReviewNeeded ||
-		books[0].CoverCandidateYear != 1920 {
+		books[0].CoverCandidateYear != 1920 || books[0].CoverAICandidateYear != 1935 ||
+		books[0].CoverAICandidateURL != "/api/books/cover-book/cover/ai-candidate" {
 		t.Fatalf("book cover summary=%#v err=%v", books, err)
 	}
 	chosen := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
@@ -270,8 +329,22 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 	}
 	state, stateErr := d.CoverStateForUser(context.Background(), "cover-owner", "cover-book")
 	if chosen.Code != http.StatusOK || updated.CoverKind != "catalog" || updated.CoverReviewNeeded ||
-		stateErr != nil || state.CandidateURL != "" || !state.LookupPaused {
+		stateErr != nil || state.CandidateURL != "" || state.AICandidateRelPath != "" || !state.LookupPaused {
 		t.Fatalf("choosing candidate = %d: %s", chosen.Code, chosen.Body)
+	}
+	if _, err := d.ExecContext(context.Background(), `UPDATE book_cover_state SET ai_candidate_relpath=?,ai_candidate_year=1940
+		WHERE book_id='cover-book'`, aiRelative); err != nil {
+		t.Fatal(err)
+	}
+	chooseAI := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
+		"cover-owner", "owner@example.org", `{"action":"use_ai_candidate"}`)
+	if chooseAI.Code != http.StatusOK {
+		t.Fatalf("AI candidate choice = %d: %s", chooseAI.Code, chooseAI.Body)
+	}
+	state, stateErr = d.CoverStateForUser(context.Background(), "cover-owner", "cover-book")
+	if stateErr != nil || state.SelectedKind != "ai_svg" || state.SelectedRelPath != aiRelative ||
+		state.AICandidateRelPath != "" || !state.LookupPaused {
+		t.Fatalf("AI cover choice state=%#v err=%v", state, stateErr)
 	}
 	outsiderChoice := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
 		"cover-outsider", "other@example.org", `{"action":"keep_current"}`)

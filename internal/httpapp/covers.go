@@ -1,6 +1,7 @@
 package httpapp
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,8 @@ func (s *Server) coverFile(w http.ResponseWriter, r *http.Request) {
 		relative = state.SelectedRelPath
 	case "candidate":
 		relative = state.CandidateRelPath
+	case "ai-candidate":
+		relative = state.AICandidateRelPath
 	default:
 		http.NotFound(w, r)
 		return
@@ -81,13 +84,13 @@ func (s *Server) chooseCover(w http.ResponseWriter, r *http.Request) {
 		Action string `json:"action"`
 	}
 	if err := decodeAdminJSON(w, r, 4096, &request); err != nil ||
-		(request.Action != "use_candidate" && request.Action != "keep_current") {
-		http.Error(w, "choose the catalog cover or keep the current cover", http.StatusBadRequest)
+		(request.Action != "use_candidate" && request.Action != "use_ai_candidate" &&
+			request.Action != "keep_current") {
+		http.Error(w, "choose a suggested cover or keep the current cover", http.StatusBadRequest)
 		return
 	}
 	bookID := r.PathValue("id")
-	chooseCandidate := request.Action == "use_candidate"
-	if err := s.db.ChooseCoverCandidate(r.Context(), user.ID, bookID, chooseCandidate); err != nil {
+	if err := s.db.ChooseCoverCandidate(r.Context(), user.ID, bookID, request.Action); err != nil {
 		if err == db.ErrBookNotFound {
 			http.NotFound(w, r)
 			return
@@ -100,5 +103,42 @@ func (s *Server) chooseCover(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	jsonOut(w, book)
+}
+
+func (s *Server) regenerateCover(w http.ResponseWriter, r *http.Request) {
+	user, _ := auth.UserFromContext(r.Context())
+	bookID := r.PathValue("id")
+	if _, err := s.db.BookForUser(r.Context(), user.ID, bookID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	settings, err := s.readCoverAISettings(r.Context())
+	if err != nil {
+		http.Error(w, "cover settings could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	if !settings.CatalogLookupEnabled && !settings.Enabled {
+		http.Error(w, "cover lookup and generated covers are both disabled by the administrator", http.StatusConflict)
+		return
+	}
+	if err := s.db.QueueCoverRegeneration(r.Context(), user.ID, bookID); err != nil {
+		switch {
+		case errors.Is(err, db.ErrBookNotFound):
+			http.NotFound(w, r)
+		case errors.Is(err, db.ErrBookJobInProgress), errors.Is(err, db.ErrBookOperationInProgress),
+			errors.Is(err, db.ErrBookDeleteInProgress), errors.Is(err, db.ErrBookCoverInProgress):
+			http.Error(w, "this book is already being updated; try again shortly", http.StatusConflict)
+		default:
+			http.Error(w, "cover regeneration could not be queued", http.StatusInternalServerError)
+		}
+		return
+	}
+	book, err := s.db.BookForUser(r.Context(), user.ID, bookID)
+	if err != nil {
+		http.Error(w, "cover regeneration was queued but the book status could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 	jsonOut(w, book)
 }

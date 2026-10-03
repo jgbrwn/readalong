@@ -25,8 +25,15 @@ const (
 type APIStyle string
 
 const (
+	APIAuto      APIStyle = "auto"
 	APIResponses APIStyle = "responses"
 	APIChat      APIStyle = "chat_completions"
+)
+
+const (
+	maxCheckOutputTokens   = 128
+	maxDesignOutputTokens  = 512
+	CurrentSettingsVersion = 1
 )
 
 type Settings struct {
@@ -35,20 +42,26 @@ type Settings struct {
 	UseBookDescription   bool     `json:"use_book_description"`
 	ModelID              string   `json:"model_id,omitempty"`
 	APIStyle             APIStyle `json:"api_style,omitempty"`
+	APIStyleVersion      int      `json:"api_style_version,omitempty"`
 }
 
-// Model is the deliberately small, browser-safe subset of Reflection's model
-// inventory used for cover design. Vision means image input, not image output.
+// Model is the browser-safe subset of the managed model catalog used for cover
+// design. Text output is what the recipe-based SVG renderer needs; vision is
+// only image input and is not required.
 type Model struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Provider         string   `json:"provider,omitempty"`
-	Description      string   `json:"description,omitempty"`
-	APIStyle         APIStyle `json:"api_style"`
-	Vision           bool     `json:"vision"`
-	ImageOutput      bool     `json:"image_output"`
-	InputPerMillion  *float64 `json:"input_per_million,omitempty"`
-	OutputPerMillion *float64 `json:"output_per_million,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Gateway             string   `json:"gateway,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	Description         string   `json:"description,omitempty"`
+	APIStyle            APIStyle `json:"api_style"`
+	TextOutput          bool     `json:"text_output"`
+	TextOutputKnown     bool     `json:"text_output_known"`
+	Vision              bool     `json:"vision"`
+	ImageOutput         bool     `json:"image_output"`
+	ReasoningEffortNone bool     `json:"reasoning_effort_none,omitempty"`
+	InputPerMillion     *float64 `json:"input_per_million,omitempty"`
+	OutputPerMillion    *float64 `json:"output_per_million,omitempty"`
 }
 
 type Registry struct {
@@ -87,14 +100,20 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Discover resolves the attached LLM integration through Reflection, fetches
-// its OpenAI-compatible model list, and returns only models suitable for image
-// input or explicit image output. It never invokes a model.
+// Discover resolves the attached LLM integration through Reflection and
+// returns models that can produce text for Readalong's local SVG renderer.
+// Catalog capability claims are preserved; metadata-less conversational
+// OpenAI models are included as unverified candidates. Discovery never invokes
+// a model.
 func (r *Registry) Discover(ctx context.Context) ([]Model, error) {
 	modelsURL, err := r.resolveModelsURL(ctx)
 	if err != nil {
 		return nil, err
 	}
+	return r.discoverAt(ctx, modelsURL)
+}
+
+func (r *Registry) discoverAt(ctx context.Context, modelsURL *url.URL) ([]Model, error) {
 	var catalog modelList
 	if err := r.getJSON(ctx, modelsURL.String(), &catalog, modelsURL.Hostname()); err != nil {
 		return nil, fmt.Errorf("managed LLM model catalog is unavailable")
@@ -106,7 +125,7 @@ func (r *Registry) Discover(ctx context.Context) ([]Model, error) {
 	seen := make(map[string]struct{})
 	for _, raw := range catalog.Data {
 		model, ok := parseModel(raw)
-		if !ok || (!model.Vision && !model.ImageOutput) {
+		if !ok || !model.TextOutput {
 			continue
 		}
 		if _, duplicate := seen[model.ID]; duplicate {
@@ -114,6 +133,23 @@ func (r *Registry) Discover(ctx context.Context) ([]Model, error) {
 		}
 		seen[model.ID] = struct{}{}
 		models = append(models, model)
+	}
+	openAIAliases := make(map[string]bool)
+	for _, model := range models {
+		if model.Gateway == "OpenAI via exe.dev" && strings.HasPrefix(model.ID, "openai/") {
+			openAIAliases[strings.TrimPrefix(model.ID, "openai/")] = true
+		}
+	}
+	if len(openAIAliases) > 0 {
+		filtered := models[:0]
+		for _, model := range models {
+			if model.Gateway == "OpenAI via exe.dev" && !strings.HasPrefix(model.ID, "openai/") &&
+				openAIAliases[model.ID] {
+				continue
+			}
+			filtered = append(filtered, model)
+		}
+		models = filtered
 	}
 	sort.Slice(models, func(i, j int) bool {
 		if models[i].Provider != models[j].Provider {
@@ -157,53 +193,162 @@ func (r *Registry) CheckModel(ctx context.Context, modelID string, style APIStyl
 	if modelID == "" || len(modelID) > 255 || hasControl(modelID) {
 		return CheckResult{}, fmt.Errorf("select a valid model")
 	}
-	if style != APIResponses && style != APIChat {
+	if style != APIAuto && style != APIResponses && style != APIChat {
 		return CheckResult{}, fmt.Errorf("select a supported API style")
 	}
-	modelsURL, err := r.resolveModelsURL(ctx)
+	modelsURL, model, err := r.lookupModel(ctx, modelID)
 	if err != nil {
 		return CheckResult{}, err
 	}
-	checkURL := *modelsURL
-	if style == APIResponses {
-		checkURL.Path = "/v1/responses"
-	} else {
-		checkURL.Path = "/v1/chat/completions"
+
+	started := time.Now()
+	styles := apiStyleAttempts(model, style)
+	for index, attemptStyle := range styles {
+		responseBody, status, err := r.requestText(ctx, modelsURL, model, attemptStyle,
+			`Return only this valid design JSON: {"theme":"geometric","colors":["#112233","#445566","#778899"]}.`, maxCheckOutputTokens)
+		if err != nil {
+			return CheckResult{
+				APIStyle: attemptStyle, LatencyMS: time.Since(started).Milliseconds(),
+				Message: "The managed LLM service could not be reached.",
+			}, nil
+		}
+		if status >= 200 && status < 300 {
+			response := parseModelResponse(responseBody, attemptStyle)
+			result := CheckResult{
+				APIStyle: attemptStyle, LatencyMS: time.Since(started).Milliseconds(),
+			}
+			switch {
+			case response.Refused:
+				result.Message = "The endpoint worked, but the model refused the small test prompt."
+			case response.Incomplete:
+				result.Message = "The endpoint worked, but the response hit its output budget before completing; this is not an API-style mismatch."
+			case response.Failed:
+				result.Message = modelCheckFailure(0, []byte(response.ErrorHint))
+			case strings.TrimSpace(response.Text) == "" || !hasValidRecipe(response.Text):
+				if style == APIAuto && index+1 < len(styles) {
+					continue
+				}
+				if strings.TrimSpace(response.Text) == "" {
+					result.Message = "The endpoint accepted the request but returned no user-visible text."
+				} else {
+					result.Message = "The model returned text, but not a valid cover design recipe."
+				}
+			default:
+				result.Healthy = true
+				if index > 0 {
+					result.Message = "Model returned a valid cover design recipe; automatic detection selected " + apiStyleLabel(attemptStyle) + "."
+				} else if style == APIAuto {
+					result.Message = "Model returned a valid cover design recipe via " + apiStyleLabel(attemptStyle) + "."
+				} else {
+					result.Message = "Model returned a valid cover design recipe; the health check succeeded."
+				}
+			}
+			return result, nil
+		}
+
+		if style == APIAuto && index+1 < len(styles) && shouldTryAlternateAPI(status, responseBody) {
+			continue
+		}
+		return CheckResult{
+			APIStyle: attemptStyle, LatencyMS: time.Since(started).Milliseconds(),
+			Message: modelCheckFailure(status, responseBody),
+		}, nil
 	}
-	var payload any
+	return CheckResult{
+		LatencyMS: time.Since(started).Milliseconds(),
+		Message:   "Neither compatible model API endpoint accepted the health check.",
+	}, nil
+}
+
+func (r *Registry) lookupModel(ctx context.Context, modelID string) (*url.URL, Model, error) {
+	modelsURL, err := r.resolveModelsURL(ctx)
+	if err != nil {
+		return nil, Model{}, err
+	}
+	models, err := r.discoverAt(ctx, modelsURL)
+	if err != nil {
+		return nil, Model{}, err
+	}
+	for _, model := range models {
+		if model.ID == modelID {
+			return modelsURL, model, nil
+		}
+	}
+	return nil, Model{}, fmt.Errorf("selected model is not available in the managed model catalog")
+}
+
+func apiStyleAttempts(model Model, requested APIStyle) []APIStyle {
+	if requested == APIResponses || requested == APIChat {
+		return []APIStyle{requested}
+	}
+	preferred := model.APIStyle
+	if preferred != APIResponses && preferred != APIChat {
+		preferred = APIChat
+	}
+	alternate := APIChat
+	if preferred == APIChat {
+		alternate = APIResponses
+	}
+	return []APIStyle{preferred, alternate}
+}
+
+func apiStyleLabel(style APIStyle) string {
 	if style == APIResponses {
-		payload = map[string]any{
-			"model": modelID, "input": "Reply with OK.", "max_output_tokens": 8,
+		return "Responses API"
+	}
+	return "Chat Completions API"
+}
+
+func shouldTryAlternateAPI(status int, body []byte) bool {
+	if status == http.StatusNotFound || status == http.StatusBadRequest {
+		return true
+	}
+	text := strings.ToLower(string(body))
+	return status == http.StatusUnprocessableEntity &&
+		(strings.Contains(text, "unsupported endpoint") || strings.Contains(text, "unsupported api"))
+}
+
+func (r *Registry) requestText(ctx context.Context, modelsURL *url.URL, model Model, style APIStyle,
+	prompt string, maxTokens int,
+) ([]byte, int, error) {
+	payload := map[string]any{"model": model.ID}
+	if style == APIResponses {
+		endpoint := *modelsURL
+		endpoint.Path = "/v1/responses"
+		payload["input"] = []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "input_text", "text": prompt,
+			}},
+		}}
+		payload["max_output_tokens"] = maxTokens
+		payload["store"] = false
+		payload["stream"] = true
+		if model.ReasoningEffortNone {
+			payload["reasoning"] = map[string]string{"effort": "none"}
 		}
-	} else {
-		payload = map[string]any{
-			"model":      modelID,
-			"messages":   []map[string]string{{"role": "user", "content": "Reply with OK."}},
-			"max_tokens": 8, "stream": false,
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not prepare model request")
 		}
+		return r.do(ctx, http.MethodPost, endpoint.String(), body, modelsURL.Hostname())
+	}
+	if style != APIChat {
+		return nil, 0, fmt.Errorf("unsupported model API style")
+	}
+	endpoint := *modelsURL
+	endpoint.Path = "/v1/chat/completions"
+	payload["messages"] = []any{map[string]string{"role": "user", "content": prompt}}
+	payload["max_tokens"] = maxTokens
+	payload["stream"] = false
+	if model.ReasoningEffortNone {
+		payload["reasoning_effort"] = "none"
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return CheckResult{}, fmt.Errorf("could not prepare model check")
+		return nil, 0, fmt.Errorf("could not prepare model request")
 	}
-	started := time.Now()
-	responseBody, status, err := r.do(ctx, http.MethodPost, checkURL.String(), body, modelsURL.Hostname())
-	result := CheckResult{APIStyle: style, LatencyMS: time.Since(started).Milliseconds()}
-	if err != nil {
-		result.Message = "The managed LLM service could not be reached."
-		return result, nil
-	}
-	if status >= 200 && status < 300 {
-		if !hasModelText(responseBody, style) {
-			result.Message = "The model endpoint responded, but returned no text. Check the selected API style."
-			return result, nil
-		}
-		result.Healthy = true
-		result.Message = "Model is responding; the small health check succeeded."
-		return result, nil
-	}
-	result.Message = modelCheckFailure(status, responseBody)
-	return result, nil
+	return r.do(ctx, http.MethodPost, endpoint.String(), body, modelsURL.Hostname())
 }
 
 func modelDiscoveryURL(item integration) (*url.URL, error) {
@@ -279,7 +424,7 @@ func (r *Registry) do(ctx context.Context, method, rawURL string, body []byte, e
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "Readalong/1.0 model discovery")
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/json")
@@ -310,10 +455,50 @@ func parseModel(raw json.RawMessage) (Model, bool) {
 	if capabilities == nil {
 		capabilities = mapValue(value["capabilities"])
 	}
+	owner := strings.ToLower(stringValue(value["owned_by"]))
+	textOutput, textOutputKnown := modelTextOutput(value, metadata, capabilities)
+	// The exe.dev catalog exposes the ChatGPT-backed OpenAI routes as
+	// conversational model IDs but omits their modality metadata. Include
+	// these as candidates and require an explicit runtime health check.
+	if !textOutputKnown && owner == "chatgpt" && !nonTextModelID(id) {
+		textOutput = true
+	}
+	// Neuralwatt's models are OpenAI-compatible completion endpoints. Its
+	// catalog advertises image input but not text output, so infer text output
+	// from this gateway's model type rather than requiring vision. Keep that
+	// inference visibly separate from explicitly advertised text capability.
+	if !textOutputKnown && owner == "neuralwatt" && !nonTextModelID(id) {
+		textOutput = true
+	}
 	name := firstString(
 		metadata["display_name"], value["name"], value["canonical_slug"], id,
 	)
-	provider := firstString(metadata["provider"], value["owned_by"])
+	provider := firstString(metadata["provider"])
+	gateway := owner
+	switch owner {
+	case "chatgpt":
+		gateway = "OpenAI via exe.dev"
+		if provider == "" {
+			provider = "OpenAI"
+		}
+	case "neuralwatt":
+		gateway = "Neuralwatt"
+		if provider == "" {
+			provider = "Neuralwatt"
+		}
+	case "openrouter":
+		gateway = "OpenRouter"
+		if provider == "" {
+			provider = openRouterProvider(id)
+		}
+	default:
+		if gateway == "" {
+			gateway = firstString(metadata["provider"], value["owned_by"])
+		}
+		if provider == "" {
+			provider = gateway
+		}
+	}
 	description := firstString(metadata["description"], value["description"])
 	if len(name) > 255 || hasControl(name) {
 		name = id
@@ -325,22 +510,59 @@ func parseModel(raw json.RawMessage) (Model, bool) {
 		description = ""
 	}
 	model := Model{
-		ID:          id,
-		Name:        name,
-		Provider:    provider,
-		Description: description,
-		APIStyle:    inferAPIStyle(value, metadata, provider, id),
-		Vision:      boolValue(capabilities["vision"]),
-		ImageOutput: hasImageOutput(value, metadata),
+		ID:                  id,
+		Name:                name,
+		Gateway:             gateway,
+		Provider:            provider,
+		Description:         description,
+		APIStyle:            inferAPIStyle(value, metadata, gateway, id),
+		TextOutput:          textOutput,
+		TextOutputKnown:     textOutputKnown,
+		Vision:              boolValue(capabilities["vision"]) || hasImageInput(value, metadata),
+		ImageOutput:         hasImageOutput(value, metadata),
+		ReasoningEffortNone: supportsNoReasoning(value, metadata),
 	}
 	if pricing := mapValue(metadata["pricing"]); pricing != nil {
 		model.InputPerMillion = optionalFloat(pricing["input_per_million"])
 		model.OutputPerMillion = optionalFloat(pricing["output_per_million"])
 	}
+	if model.InputPerMillion == nil || model.OutputPerMillion == nil {
+		if pricing := mapValue(value["pricing"]); pricing != nil {
+			if model.InputPerMillion == nil {
+				model.InputPerMillion = perTokenPrice(pricing["prompt"])
+			}
+			if model.OutputPerMillion == nil {
+				model.OutputPerMillion = perTokenPrice(pricing["completion"])
+			}
+		}
+	}
 	if deprecated, _ := metadata["deprecated"].(bool); deprecated {
 		return Model{}, false
 	}
-	return model, model.Vision || model.ImageOutput
+	return model, model.TextOutput
+}
+
+func hasImageInput(model, metadata map[string]any) bool {
+	for _, root := range []map[string]any{model, metadata, mapValue(model["architecture"]), mapValue(metadata["architecture"])} {
+		if root == nil {
+			continue
+		}
+		for _, key := range []string{"input_modalities", "input_modality"} {
+			if containsImageModality(root[key]) {
+				return true
+			}
+		}
+		if modalities := mapValue(root["modalities"]); containsImageModality(modalities["input"]) {
+			return true
+		}
+		if modality, ok := root["modality"].(string); ok {
+			if input, _, found := strings.Cut(modality, "->"); found &&
+				strings.Contains(strings.ToLower(input), "image") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func inferAPIStyle(model, metadata map[string]any, provider, id string) APIStyle {
@@ -363,6 +585,121 @@ func inferAPIStyle(model, metadata map[string]any, provider, id string) APIStyle
 		return APIResponses
 	}
 	return APIChat
+}
+
+func modelTextOutput(model, metadata, capabilities map[string]any) (bool, bool) {
+	roots := []map[string]any{
+		model, metadata, capabilities,
+		mapValue(model["architecture"]), mapValue(metadata["architecture"]),
+	}
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		for _, key := range []string{"output_modalities", "output_modality"} {
+			if modalities, ok := modalitySet(root[key]); ok {
+				return modalities["text"], true
+			}
+		}
+		if modalities, ok := modalitySet(root["modalities"]); ok {
+			return modalities["text"], true
+		}
+		if modality, ok := root["modality"].(string); ok {
+			_, output, found := strings.Cut(modality, "->")
+			if found {
+				return strings.Contains(strings.ToLower(output), "text"), true
+			}
+		}
+	}
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		for _, key := range []string{"text_output", "text_generation", "generates_text"} {
+			if value, exists := root[key]; exists {
+				return boolValue(value), true
+			}
+		}
+	}
+	return false, false
+}
+
+func modalitySet(value any) (map[string]bool, bool) {
+	modalities := make(map[string]bool)
+	switch typed := value.(type) {
+	case string:
+		for _, part := range strings.FieldsFunc(strings.ToLower(typed), func(r rune) bool {
+			return r == ',' || r == '+' || r == ' ' || r == '/'
+		}) {
+			modalities[part] = true
+		}
+		return modalities, len(modalities) > 0
+	case []any:
+		for _, item := range typed {
+			if part, ok := item.(string); ok && strings.TrimSpace(part) != "" {
+				modalities[strings.ToLower(strings.TrimSpace(part))] = true
+			}
+		}
+		return modalities, len(modalities) > 0
+	case map[string]any:
+		for key, enabled := range typed {
+			if boolValue(enabled) {
+				modalities[strings.ToLower(key)] = true
+			}
+		}
+		return modalities, len(modalities) > 0
+	default:
+		return nil, false
+	}
+}
+
+func nonTextModelID(id string) bool {
+	id = strings.ToLower(id)
+	for _, marker := range []string{"embed", "moderation", "whisper", "transcri", "text-to-speech", "tts", "dall-e", "gpt-image"} {
+		if strings.Contains(id, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func openRouterProvider(id string) string {
+	parts := strings.Split(strings.TrimPrefix(id, "openrouter/"), "/")
+	if len(parts) > 1 && parts[0] != "" {
+		return parts[0]
+	}
+	return "OpenRouter"
+}
+
+func supportsNoReasoning(model, metadata map[string]any) bool {
+	for _, root := range []map[string]any{model, metadata} {
+		reasoning := mapValue(root["reasoning"])
+		if reasoning == nil {
+			continue
+		}
+		if boolValue(reasoning["mandatory"]) {
+			continue
+		}
+		for _, key := range []string{"supported_efforts", "accepted_efforts"} {
+			if efforts, ok := reasoning[key].([]any); ok {
+				for _, effort := range efforts {
+					if strings.EqualFold(stringValue(effort), "none") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func perTokenPrice(value any) *float64 {
+	price := optionalFloat(value)
+	if price == nil || *price > 1 {
+		return nil
+	}
+	perMillion := *price * 1_000_000
+	return &perMillion
 }
 
 func validDiscoveryURL(u *url.URL) bool {
@@ -414,6 +751,9 @@ func modelCheckFailure(status int, body []byte) string {
 	case status == http.StatusPaymentRequired || strings.Contains(text, "insufficient_quota") ||
 		strings.Contains(text, "credit") || strings.Contains(text, "budget exhausted") || strings.Contains(text, "billing"):
 		return "The provider reports that billing or available credits need attention."
+	case strings.Contains(text, "upstream_provider_shared_pool") ||
+		strings.Contains(text, "temporarily rate-limited upstream"):
+		return "This model's upstream provider is temporarily rate-limited; try again later or choose another model."
 	case status == http.StatusTooManyRequests:
 		return "The model is rate-limited or its quota is exhausted; check the provider's usage and credits."
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
@@ -424,6 +764,8 @@ func modelCheckFailure(status int, body []byte) string {
 		return "The model rejected the health-check request. The selected API style may not match this model."
 	case status >= 500:
 		return "The selected model provider is temporarily unavailable."
+	case status <= 0:
+		return "The model response ended with an error; check provider access, billing, and model availability."
 	default:
 		return fmt.Sprintf("The model check failed with HTTP %d.", status)
 	}
@@ -506,6 +848,12 @@ func optionalFloat(value any) *float64 {
 		result = number
 	case json.Number:
 		parsed, err := strconv.ParseFloat(number.String(), 64)
+		if err != nil {
+			return nil
+		}
+		result = parsed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(number), 64)
 		if err != nil {
 			return nil
 		}

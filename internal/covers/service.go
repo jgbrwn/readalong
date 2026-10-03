@@ -79,7 +79,9 @@ func waitCover(ctx context.Context, ticker <-chan time.Time) bool {
 	}
 }
 
-func (s *Service) lookupOpenLibrary(ctx context.Context, task db.CoverTask, now time.Time) (Candidate, bool, time.Time, error) {
+func (s *Service) lookupOpenLibrary(ctx context.Context, task db.CoverTask, now time.Time,
+	forceRefresh bool,
+) (Candidate, bool, time.Time, error) {
 	author := trustedCoverAuthor(task)
 	key := coverCacheKey(task.Title, author)
 	nowText := now.UTC().Format(time.RFC3339)
@@ -88,7 +90,7 @@ func (s *Service) lookupOpenLibrary(ctx context.Context, task db.CoverTask, now 
 		return Candidate{}, false, time.Time{}, err
 	}
 	cacheNext, _ := time.Parse(time.RFC3339, cached.NextCheckAt)
-	if fresh {
+	if fresh && !forceRefresh {
 		candidate, found, err := cachedCoverCandidate(cached)
 		return candidate, found, cacheNext, err
 	}
@@ -182,6 +184,10 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 		s.setFailure(ctx, task)
 		return
 	}
+	if task.RegenerationRequested {
+		s.processRegeneration(ctx, task, settings)
+		return
+	}
 	if !settings.CatalogLookupEnabled {
 		if task.Title != "" && task.Title != "Untitled" && task.SelectedKind == "" &&
 			settings.Enabled && settings.ModelID != "" {
@@ -196,7 +202,7 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 		return
 	}
 	now := time.Now().UTC()
-	candidate, found, cacheNext, err := s.lookupOpenLibrary(ctx, task, now)
+	candidate, found, cacheNext, err := s.lookupOpenLibrary(ctx, task, now, false)
 	if err != nil {
 		if errors.Is(err, errOpenLibraryDailyLimit) {
 			next := now.UTC().Truncate(24 * time.Hour).Add(24*time.Hour + 5*time.Minute)
@@ -233,6 +239,73 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 		return
 	}
 	s.generateFallback(ctx, task, settings, candidate.Year, nextCheck.Format(time.RFC3339))
+}
+
+func (s *Service) processRegeneration(ctx context.Context, task db.CoverTask, settings coverai.Settings) {
+	now := time.Now().UTC()
+	var suggestion *db.CoverSuggestion
+	aiYear := 0
+	nextCheckAt := ""
+	lookupResult := ""
+	if settings.CatalogLookupEnabled && task.Title != "" && task.Title != "Untitled" {
+		candidate, found, cacheNext, err := s.lookupOpenLibrary(ctx, task, now, true)
+		switch {
+		case errors.Is(err, errOpenLibraryDailyLimit):
+			lookupResult = "rate_limited"
+			nextCheckAt = now.Truncate(24 * time.Hour).Add(24*time.Hour + 5*time.Minute).Format(time.RFC3339)
+		case err != nil:
+			lookupResult = "failed"
+			nextCheckAt = nextProviderRetry(task.FailureCount, now).Format(time.RFC3339)
+		case found:
+			lookupResult = "found"
+			suggestion = &db.CoverSuggestion{URL: candidate.ImageURL, SourceURL: candidate.SourceURL, Year: candidate.Year}
+			if candidate.Year > 0 {
+				aiYear = candidate.Year
+			}
+		default:
+			lookupResult = "missing"
+			nextCheck := nextNegativeCheck(task.NoMatchCount, now)
+			if cacheNext.After(nextCheck) {
+				nextCheck = cacheNext
+			}
+			nextCheckAt = nextCheck.Format(time.RFC3339)
+			if candidate.Year > 0 {
+				aiYear = candidate.Year
+			}
+		}
+	}
+
+	aiPath := ""
+	if settings.Enabled && settings.ModelID != "" && task.Title != "" && task.Title != "Untitled" {
+		description := ""
+		if settings.UseBookDescription {
+			description = task.BookDescription
+		}
+		image, err := s.models.GenerateVectorCover(ctx, settings.ModelID, settings.APIStyle,
+			task.Title, trustedCoverAuthor(task), description, aiYear)
+		if err == nil {
+			filename := filepath.Join(pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID),
+				"cover", fmt.Sprintf("generated-regenerated-%d.svg", time.Now().UTC().UnixNano()))
+			if err := writeAtomic(filename, image); err == nil {
+				if relative, err := filepath.Rel(s.cfg.DataDir, filename); err == nil {
+					aiPath = relative
+				} else {
+					_ = os.Remove(filename)
+				}
+			}
+		}
+		if err != nil {
+			log.Printf("readalong: regenerated cover design failed")
+		}
+	}
+
+	if err := s.db.SetCoverRegenerationResults(ctx, task, suggestion, aiPath, aiYear,
+		now.Format(time.RFC3339), nextCheckAt, lookupResult); err != nil {
+		if aiPath != "" {
+			_ = os.Remove(filepath.Join(s.cfg.DataDir, aiPath))
+		}
+		s.setFailure(ctx, task)
+	}
 }
 
 func (s *Service) generateFallback(ctx context.Context, task db.CoverTask, settings coverai.Settings,
@@ -398,11 +471,22 @@ func (s *Service) coverAISettings(ctx context.Context) (coverai.Settings, error)
 		return coverai.Settings{}, err
 	}
 	if !found {
-		return coverai.Settings{CatalogLookupEnabled: true, UseBookDescription: true}, nil
+		return coverai.Settings{
+			APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
+			CatalogLookupEnabled: true, UseBookDescription: true,
+		}, nil
 	}
 	var settings coverai.Settings
 	if err := json.Unmarshal([]byte(setting.Value), &settings); err != nil {
 		return coverai.Settings{}, fmt.Errorf("cover settings are invalid")
+	}
+	if settings.APIStyleVersion < coverai.CurrentSettingsVersion {
+		settings.APIStyle = coverai.APIAuto
+		settings.APIStyleVersion = coverai.CurrentSettingsVersion
+	}
+	if settings.APIStyle != coverai.APIAuto && settings.APIStyle != coverai.APIResponses &&
+		settings.APIStyle != coverai.APIChat {
+		settings.APIStyle = coverai.APIAuto
 	}
 	return settings, nil
 }

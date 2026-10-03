@@ -205,9 +205,10 @@ func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T
 		t.Fatal(err)
 	}
 	if _, err := d.ExecContext(ctx, `INSERT INTO book_cover_state
-		(book_id,status,selected_kind,selected_relpath,selected_provider,selected_year,lookup_paused,updated_at)
+		(book_id,status,selected_kind,selected_relpath,selected_provider,selected_year,
+		 ai_candidate_relpath,ai_candidate_year,lookup_paused,updated_at)
 		VALUES('original','selected','ai_svg','books/owner/original/cover/generated.svg',
-			'Readalong vector art',1935,1,'2026-01-01')`); err != nil {
+			'Readalong vector art',1935,'books/owner/original/cover/generated-review.svg',1940,1,'2026-01-01')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ExecContext(ctx, `INSERT INTO chapters(id,book_id,ordinal,title,start_ms,end_ms,transcript_state,alignment_quality)
@@ -232,8 +233,9 @@ func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T
 	if err := d.CloneReadyBookForAdmin(ctx, operation, BookArtifactPaths{
 		Audio: "books/recipient/clone-id/playback.mp3", EPUB: "books/recipient/clone-id/book.epub",
 		EbookJSON: "books/recipient/clone-id/ebook.json.gz", Transcript: "books/recipient/clone-id/transcript.json.gz",
-		Alignment:     "books/recipient/clone-id/alignment.json.gz",
-		CoverSelected: "books/recipient/clone-id/cover/generated.svg",
+		Alignment:        "books/recipient/clone-id/alignment.json.gz",
+		CoverSelected:    "books/recipient/clone-id/cover/generated.svg",
+		CoverAICandidate: "books/recipient/clone-id/cover/generated-review.svg",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,8 +260,14 @@ func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T
 		clone.GutenbergID != "123" || clone.AlignmentQuality == nil || *clone.AlignmentQuality != quality ||
 		clone.AudioRelPath != "books/recipient/clone-id/playback.mp3" || clone.JobStatus != "completed" ||
 		clone.CoverKind != "ai_svg" || clone.CoverYear != 1935 ||
-		clone.CoverURL != "/api/books/clone-id/cover/selected" {
+		clone.CoverURL != "/api/books/clone-id/cover/selected" ||
+		clone.CoverAICandidateURL != "/api/books/clone-id/cover/ai-candidate" ||
+		clone.CoverAICandidateYear != 1940 {
 		t.Fatalf("unexpected cloned book: %#v", clone)
+	}
+	coverState, err := d.CoverStateForUser(ctx, "recipient", "clone-id")
+	if err != nil || coverState.AICandidateRelPath != "books/recipient/clone-id/cover/generated-review.svg" {
+		t.Fatalf("generated cover candidate was not remapped on clone: %#v err=%v", coverState, err)
 	}
 	if _, err := d.BookForUser(ctx, "book-owner", "original"); err != nil {
 		t.Fatalf("source book was not retained: %v", err)

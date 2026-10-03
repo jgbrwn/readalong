@@ -134,13 +134,13 @@ button { cursor: pointer; }
   border-radius: 50%; color: white; background: #1118; font-size: 1.35rem; opacity: 0;
 }
 .book-card:hover .delete-book, .delete-book:focus-visible { opacity: 1; }
-.book-card-actions { padding: 5px 2px 0; }
-.retranscribe-book {
+.book-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 5px 2px 0; }
+.retranscribe-book, .regenerate-cover {
   min-height: 34px; padding: 0 12px; border: 1px solid #d6ddd4; border-radius: 999px;
   color: #30483a; background: #eef1e9; font-size: .73rem; font-weight: 650;
 }
-.retranscribe-book:hover { background: #e2e9df; }
-.retranscribe-book:disabled { opacity: .7; cursor: wait; }
+.retranscribe-book:hover, .regenerate-cover:hover { background: #e2e9df; }
+.retranscribe-book:disabled, .regenerate-cover:disabled { opacity: .7; cursor: wait; }
 .empty-shelf { grid-column: 1/-1; padding: 42px 20px 48px; border: 1px dashed #cfcec5; border-radius: 20px; text-align: center; }
 .empty-mark { display: grid; place-items: center; width: 43px; height: 43px; margin: 0 auto 16px; border-radius: 50%; color: var(--accent); background: #eee9df; font-size: 1.3rem; }
 .empty-shelf h3 { margin: 0; font: 500 1.6rem Georgia, serif; }
@@ -175,7 +175,7 @@ button { cursor: pointer; }
 .cover-review-content { display: grid; gap: 13px; padding: 30px; }
 .cover-review-content h2 { margin: 0; font: 500 2.1rem Georgia, serif; letter-spacing: -.04em; }
 .cover-review-content > .muted { margin: 0; }
-.cover-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.cover-compare { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .cover-compare figure { min-width: 0; margin: 0; }
 .cover-compare img, .cover-compare .book-cover { display: block; width: min(100%, 240px); aspect-ratio: .76; height: auto; margin: 0 auto; object-fit: cover; border-radius: 8px 16px 16px 8px; }
 .cover-compare figcaption { margin-top: 8px; color: var(--muted); font-size: .75rem; text-align: center; }
@@ -224,6 +224,7 @@ button { cursor: pointer; }
 .cover-ai-controls { display: grid; gap: 11px; max-width: 560px; padding: 19px; border: 1px solid var(--line); border-radius: 18px; background: #fffefa; }
 .cover-ai-controls > label:not(.admin-checkbox) { color: var(--ink); font-size: .82rem; font-weight: 650; }
 .cover-ai-controls select { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: white; }
+.cover-ai-controls input[type="search"] { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: white; }
 .cover-ai-controls .muted, .cover-ai-controls .fine-print { margin: 0; }
 .admin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .admin-checkbox { display: flex; align-items: flex-start; gap: 9px; font-size: .82rem; line-height: 1.45; }
@@ -353,6 +354,7 @@ button { cursor: pointer; }
   #shelfSearch { width: min(190px, 45vw); min-height: 36px; font-size: .76rem; }
   #shelfSort { min-height: 36px; max-width: 100%; font-size: .72rem; }
   .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 12px; }
+  .book-card-actions { grid-template-columns: 1fr; }
   .book-cover { padding: 15px 13px; }
   .book-cover-frame .book-cover { padding: 15px 13px; }
   .book-cover strong { font-size: clamp(1.2rem, 7vw, 1.7rem); }
@@ -364,6 +366,7 @@ button { cursor: pointer; }
   .sheet form { padding: 24px 20px; }
   .discover-content { padding: 24px 20px; }
   .cover-review-content { padding: 24px 18px; }
+  .cover-compare { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .reader-topbar { grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; min-height: 56px; padding-inline: 14px; }
   .reader-topbar a { font-size: .75rem; }
   .reader-bookname { max-width: 44vw; font-size: .72rem; }

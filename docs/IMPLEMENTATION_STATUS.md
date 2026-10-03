@@ -60,12 +60,14 @@ Implemented first passes:
   caching, persisted retry/backoff, and owner-checked local image serving;
 - catalog-cover review that never silently replaces a selected generated
   cover; choosing to keep the generated cover pauses future automatic checks;
-- optional AI-designed SVG fallback. Reflection discovers the VM's managed
-  vision model list, caches it, and provides a model/API-style selector and
-  small health check. The current model inventory advertises image input, not
-  image output, so the selected LLM returns a bounded design recipe and
-  Readalong renders the SVG locally instead of pretending it can emit a
-  raster image;
+- optional AI-designed SVG fallback. Reflection discovers text-output models
+  across OpenAI/ChatGPT, Neuralwatt, and OpenRouter, caches a sanitized
+  capability/pricing list, and provides searchable selection, Auto API
+  detection/fallback, and a live health check. The selected LLM returns a
+  bounded design recipe and Readalong renders the SVG locally;
+- per-book cover regeneration. The owner can rerun catalog discovery and
+  generate a fresh AI candidate while keeping the selected cover, then choose
+  the current, catalog, or generated cover;
 - admin-only asynchronous clone/transfer for complete, idle books. It copies
   files independently, does not copy reading progress or runnable jobs, and
   shows progress in the admin panel.

@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestDiscoverUsesReflectionNameAndAdvertisedCapabilities(t *testing.T) {
+func TestDiscoverIncludesTextDesignModelsAcrossManagedProviders(t *testing.T) {
 	var modelCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -32,12 +33,29 @@ func TestDiscoverUsesReflectionNameAndAdvertisedCapabilities(t *testing.T) {
 						"pricing":      map[string]any{"input_per_million": 0.25, "output_per_million": 0.5},
 					},
 				},
+				map[string]any{"id": "test-vision", "owned_by": "chatgpt"},
 				map[string]any{
 					"id": "neuralwatt/test-vision", "owned_by": "neuralwatt",
 					"metadata": map[string]any{
 						"display_name": "Neuralwatt vision",
 						"capabilities": map[string]any{"vision": true},
 					},
+				},
+				map[string]any{
+					"id": "neuralwatt/test-text", "owned_by": "neuralwatt",
+					"metadata": map[string]any{
+						"display_name": "Neuralwatt text",
+						"capabilities": map[string]any{"vision": false},
+					},
+				},
+				map[string]any{
+					"id": "openrouter/test-text", "owned_by": "openrouter",
+					"name": "OpenRouter: Text",
+					"architecture": map[string]any{
+						"modality": "text->text", "input_modalities": []string{"text"},
+						"output_modalities": []string{"text"},
+					},
+					"pricing": map[string]any{"prompt": "0.0000008", "completion": "0.0000016"},
 				},
 				map[string]any{
 					"id": "text-only", "metadata": map[string]any{"capabilities": map[string]any{"vision": false}},
@@ -64,7 +82,7 @@ func TestDiscoverUsesReflectionNameAndAdvertisedCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 1 || len(models) != 3 {
+	if modelCalls != 1 || len(models) != 5 {
 		t.Fatalf("model list calls=%d models=%#v", modelCalls, models)
 	}
 	byID := make(map[string]Model, len(models))
@@ -72,20 +90,34 @@ func TestDiscoverUsesReflectionNameAndAdvertisedCapabilities(t *testing.T) {
 		byID[model.ID] = model
 	}
 	if got := byID["openai/test-vision"]; got.APIStyle != APIResponses || !got.Vision ||
-		got.InputPerMillion == nil || *got.InputPerMillion != 0.25 {
+		got.TextOutputKnown || !got.TextOutput || got.Gateway != "OpenAI via exe.dev" {
 		t.Fatalf("Responses model metadata was not retained: %#v", got)
+	}
+	if _, found := byID["test-vision"]; found {
+		t.Fatal("unprefixed OpenAI alias was duplicated beside its canonical ID")
 	}
 	if got := byID["neuralwatt/test-vision"]; got.APIStyle != APIChat || !got.Vision {
 		t.Fatalf("Chat Completions model style was not inferred: %#v", got)
 	}
-	if got := byID["image-output"]; !got.ImageOutput || got.Vision {
-		t.Fatalf("explicit image-output capability was lost: %#v", got)
+	if got := byID["neuralwatt/test-text"]; !got.TextOutput || got.Vision {
+		t.Fatalf("text generation was incorrectly gated on vision: %#v", got)
+	}
+	if got := byID["neuralwatt/test-text"]; got.TextOutputKnown {
+		t.Fatalf("inferred Neuralwatt capability was mislabeled as catalog-advertised: %#v", got)
+	}
+	if got := byID["openrouter/test-text"]; !got.TextOutput || got.InputPerMillion == nil ||
+		math.Abs(*got.InputPerMillion-0.8) > 1e-9 || got.OutputPerMillion == nil ||
+		math.Abs(*got.OutputPerMillion-1.6) > 1e-9 {
+		t.Fatalf("OpenRouter text modalities/pricing were not normalized: %#v", got)
 	}
 	if _, found := byID["text-only"]; found {
-		t.Fatal("text-only model entered the cover model picker")
+		t.Fatal("model with no advertised/inferred text capability entered the picker")
 	}
-	if _, found := byID["image-input-only"]; found {
-		t.Fatal("image-input capability was mistaken for image output")
+	if got, found := byID["image-input-only"]; !found || !got.TextOutput || !got.Vision {
+		t.Fatalf("text-output model with image input should remain eligible: %#v", got)
+	}
+	if _, found := byID["image-output"]; found {
+		t.Fatal("image-only model entered a text-to-SVG recipe picker")
 	}
 }
 
@@ -99,25 +131,45 @@ func TestCheckModelUsesSelectedAPIStyleAndReportsQuotaIssues(t *testing.T) {
 					"name": "llm", "type": "llm", "help": fmt.Sprintf("curl %s/v1/models", "http://"+r.Host),
 				}},
 			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "openai/test", "owned_by": "chatgpt"},
+				map[string]any{
+					"id": "neuralwatt/test", "owned_by": "neuralwatt",
+					"metadata": map[string]any{
+						"capabilities": map[string]any{"vision": false},
+						"reasoning":    map[string]any{"mandatory": false, "accepted_efforts": []string{"none"}},
+					},
+				},
+			}})
 		case "/v1/responses":
 			calls = append(calls, "responses")
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
-				body["model"] != "openai/test" || body["max_output_tokens"] != float64(8) {
+				body["model"] != "openai/test" || body["max_output_tokens"] != float64(maxCheckOutputTokens) ||
+				body["store"] != false || body["stream"] != true {
 				t.Errorf("bad Responses health check: %#v, err=%v", body, err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"output": []any{map[string]any{
-				"type": "message", "content": []any{map[string]any{"type": "output_text", "text": "OK"}},
-			}}})
+			input := anySlice(body["input"])
+			if len(input) != 1 || len(anySlice(mapValue(input[0])["content"])) != 1 {
+				t.Errorf("Responses health check must use the typed message-list input: %#v", body["input"])
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			recipe := `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`
+			delta, _ := json.Marshal(recipe)
+			_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":" + string(delta) + "}\n\n" +
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"))
 		case "/v1/chat/completions":
 			calls = append(calls, "chat")
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
-				body["model"] != "neuralwatt/test" || body["max_tokens"] != float64(8) {
+				body["model"] != "neuralwatt/test" || body["max_tokens"] != float64(maxCheckOutputTokens) ||
+				body["reasoning_effort"] != "none" || body["stream"] != false {
 				t.Errorf("bad Chat Completions health check: %#v, err=%v", body, err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]any{"content": "OK"},
+				"message":       map[string]any{"content": []any{map[string]any{"type": "text", "text": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`}}},
+				"finish_reason": "stop",
 			}}})
 		case "/v1/chat/completions/quota":
 			http.Error(w, `{"error":{"code":"insufficient_quota"}}`, http.StatusPaymentRequired)
@@ -128,16 +180,108 @@ func TestCheckModelUsesSelectedAPIStyleAndReportsQuotaIssues(t *testing.T) {
 	defer server.Close()
 
 	registry := &Registry{ReflectionURL: server.URL + "/integrations", HTTP: server.Client()}
-	responses, err := registry.CheckModel(context.Background(), "openai/test", APIResponses)
+	responses, err := registry.CheckModel(context.Background(), "openai/test", APIAuto)
 	if err != nil || !responses.Healthy || responses.APIStyle != APIResponses {
 		t.Fatalf("Responses check = %#v, err=%v", responses, err)
 	}
-	chat, err := registry.CheckModel(context.Background(), "neuralwatt/test", APIChat)
+	chat, err := registry.CheckModel(context.Background(), "neuralwatt/test", APIAuto)
 	if err != nil || !chat.Healthy || chat.APIStyle != APIChat {
 		t.Fatalf("Chat Completions check = %#v, err=%v", chat, err)
 	}
 	if strings.Join(calls, ",") != "responses,chat" {
 		t.Fatalf("unexpected API calls: %v", calls)
+	}
+}
+
+func TestAutoCheckFallsBackOnlyWhenPreferredEndpointRejectsRequest(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/integrations":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"integrations": []any{map[string]any{
+					"name": "llm", "type": "llm", "help": fmt.Sprintf("curl %s/v1/models", "http://"+r.Host),
+				}},
+			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "openai/test", "owned_by": "chatgpt"},
+			}})
+		case "/v1/responses":
+			calls = append(calls, "responses")
+			http.NotFound(w, r)
+		case "/v1/chat/completions":
+			calls = append(calls, "chat")
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+				"message":       map[string]any{"content": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`},
+				"finish_reason": "stop",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	registry := &Registry{ReflectionURL: server.URL + "/integrations", HTTP: server.Client()}
+	result, err := registry.CheckModel(context.Background(), "openai/test", APIAuto)
+	if err != nil || !result.Healthy || result.APIStyle != APIChat ||
+		!strings.Contains(result.Message, "automatic detection") {
+		t.Fatalf("automatic endpoint fallback = %#v, err=%v", result, err)
+	}
+	if strings.Join(calls, ",") != "responses,chat" {
+		t.Fatalf("unexpected endpoint attempts: %v", calls)
+	}
+}
+
+func TestAutoCheckTriesAlternateAfterEmptySuccessfulResponse(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/integrations":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"integrations": []any{map[string]any{
+					"name": "llm", "type": "llm", "help": fmt.Sprintf("curl %s/v1/models", "http://"+r.Host),
+				}},
+			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "openai/test", "owned_by": "chatgpt"},
+			}})
+		case "/v1/responses":
+			calls = append(calls, "responses")
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "output": []any{}})
+		case "/v1/chat/completions":
+			calls = append(calls, "chat")
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+				"message":       map[string]any{"content": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`},
+				"finish_reason": "stop",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	registry := &Registry{ReflectionURL: server.URL + "/integrations", HTTP: server.Client()}
+	result, err := registry.CheckModel(context.Background(), "openai/test", APIAuto)
+	if err != nil || !result.Healthy || result.APIStyle != APIChat {
+		t.Fatalf("empty-response fallback = %#v, err=%v", result, err)
+	}
+	if strings.Join(calls, ",") != "responses,chat" {
+		t.Fatalf("unexpected endpoint attempts: %v", calls)
+	}
+}
+
+func TestHealthCheckDistinguishesOutputBudgetFromEndpointMismatch(t *testing.T) {
+	response := parseModelResponse([]byte(`{"choices":[{"message":{"content":null,"reasoning":"thinking"},"finish_reason":"length"}]}`), APIChat)
+	if !response.Incomplete || response.Text != "" {
+		t.Fatalf("reasoning-only truncation not recognized: %#v", response)
+	}
+	streamedFailure := parseModelResponse([]byte(`event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"insufficient_quota","message":"billing needed"}}}
+
+`), APIResponses)
+	if !streamedFailure.Failed || !strings.Contains(
+		modelCheckFailure(0, []byte(streamedFailure.ErrorHint)), "credits") {
+		t.Fatalf("streamed billing failure was not classified: %#v", streamedFailure)
 	}
 }
 
@@ -147,6 +291,10 @@ func TestModelCheckClassifiesSubscriptionAndQuotaFailures(t *testing.T) {
 	}
 	if got := modelCheckFailure(http.StatusTooManyRequests, []byte(`{"error":"rate limit"}`)); !strings.Contains(got, "quota") {
 		t.Fatalf("rate limit failure was not actionable: %q", got)
+	}
+	if got := modelCheckFailure(http.StatusTooManyRequests,
+		[]byte(`{"metadata":{"raw":"model is temporarily rate-limited upstream","limit_source":"upstream_provider_shared_pool"}}`)); !strings.Contains(got, "upstream provider is temporarily rate-limited") {
+		t.Fatalf("shared-pool provider limit was not distinguished: %q", got)
 	}
 }
 
@@ -182,7 +330,7 @@ func TestParseRecipeFallsBackFromUntrustedModelMarkup(t *testing.T) {
 	}
 }
 
-func TestGenerateVectorCoverUsesConfiguredResponsesOrChatEndpoint(t *testing.T) {
+func TestGenerateVectorCoverUsesTypedRequestsAndSharedResponseParsing(t *testing.T) {
 	var endpoints []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -192,18 +340,31 @@ func TestGenerateVectorCoverUsesConfiguredResponsesOrChatEndpoint(t *testing.T) 
 					"name": "llm", "type": "llm", "help": fmt.Sprintf("curl %s/v1/models", "http://"+r.Host),
 				}},
 			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{
+					"id": "sample/vision", "owned_by": "neuralwatt",
+					"metadata": map[string]any{
+						"capabilities": map[string]any{"vision": true},
+						"reasoning":    map[string]any{"accepted_efforts": []string{"none"}},
+					},
+				},
+			}})
 		case "/v1/responses":
 			endpoints = append(endpoints, "responses")
 			var request map[string]any
 			err := json.NewDecoder(r.Body).Decode(&request)
-			prompt, _ := request["input"].(string)
-			if err != nil || !strings.Contains(prompt, "A short story of courage") {
+			input := anySlice(request["input"])
+			content := anySlice(mapValue(input[0])["content"])
+			prompt := stringValue(mapValue(content[0])["text"])
+			if err != nil || request["store"] != false || request["stream"] != true ||
+				request["max_output_tokens"] != float64(maxDesignOutputTokens) ||
+				!strings.Contains(prompt, "A short story of courage") {
 				t.Errorf("Responses cover request omitted the short description: %#v err=%v", request, err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"output": []any{map[string]any{
-				"type": "message", "content": []any{map[string]any{"type": "output_text",
-					"text": `{"theme":"celestial","colors":["#112233","#445566","#778899"]}`}},
-			}}})
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"theme\\\":\\\"celestial\\\",\\\"colors\\\":[\\\"#112233\\\",\\\"#445566\\\",\\\"#778899\\\"]}\"}\n\n" +
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"))
 		case "/v1/chat/completions":
 			endpoints = append(endpoints, "chat")
 			var request map[string]any
@@ -215,7 +376,8 @@ func TestGenerateVectorCoverUsesConfiguredResponsesOrChatEndpoint(t *testing.T) 
 				t.Errorf("Chat Completions cover request omitted the short description: %#v", request)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]any{"content": `{"theme":"coastal","colors":["#123456","#456789","#789ABC"]}`},
+				"message":       map[string]any{"content": `{"theme":"coastal","colors":["#123456","#456789","#789ABC"]}`},
+				"finish_reason": "stop",
 			}}})
 		default:
 			http.NotFound(w, r)
