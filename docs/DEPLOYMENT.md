@@ -45,9 +45,10 @@ to its `X-ExeDev-UserID`. Remove the bootstrap email afterward; the role
 remains attached to that user ID. Do not put real user emails in source code
 or commit `.env`.
 
-Admin users keep their normal bookshelf. The initial admin API supports
-listing accounts and suspending/reactivating a user; it does not grant access
-to other users' books.
+Admin users keep their normal bookshelf. Admin tools can list accounts and
+suspend/reactivate users. A separate audited operation can clone or transfer
+a complete, idle book to another active account; it does not grant general
+cross-account access to books, readers, or media.
 
 ## Optional Cloudflare administration
 

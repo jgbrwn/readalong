@@ -195,8 +195,10 @@ On first authenticated API use, a user record is created. Admin access can be
 configured by stable `ADMIN_USER_IDS`. For first setup,
 `ADMIN_BOOTSTRAP_EMAILS` grants admin to the first matching authenticated
 identity and binds that claim to its stable user ID. Admins keep their own
-bookshelf; admin controls can list accounts and suspend/reactivate access but
-do not bypass book ownership.
+bookshelf; admin controls can list accounts and suspend/reactivate access.
+Separate audited tools can clone or transfer complete, idle books to another
+active account. These explicit operations do not otherwise bypass normal
+owner-scoped book, reader, or media access.
 
 ## License
 
