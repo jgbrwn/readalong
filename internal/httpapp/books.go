@@ -216,7 +216,7 @@ func (s *Server) searchPairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	pairs, err := s.catalog.Search(r.Context(), query)
+	result, err := s.catalog.SearchWithStatus(r.Context(), query)
 	if err != nil {
 		status := http.StatusBadGateway
 		if len([]rune(query)) < 2 || len([]rune(query)) > 100 || hasControlChars(query) {
@@ -225,7 +225,10 @@ func (s *Server) searchPairs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	jsonOut(w, pairs)
+	if result.Warning != "" {
+		w.Header().Set("X-Readalong-Search-Warning", result.Warning)
+	}
+	jsonOut(w, result.Pairs)
 }
 
 func (s *Server) importPair(w http.ResponseWriter, r *http.Request) {

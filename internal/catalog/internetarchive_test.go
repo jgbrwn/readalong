@@ -146,6 +146,80 @@ func TestLibriVoxAPIIsUsedWhenArchiveSearchIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestSearchWithStatusReturnsEmptyAndWarningWhenFallbackIsUnavailable(t *testing.T) {
+	var archiveCalls, libriVoxCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/advancedsearch.php":
+			archiveCalls.Add(1)
+			if got := r.URL.Query().Get("q"); got != "collection:librivoxaudio AND mediatype:audio AND title:(confederacy AND dunces)" {
+				t.Errorf("unexpected Archive search query %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"docs": []any{}}})
+		case "/api/feed/audiobooks/":
+			libriVoxCalls.Add(1)
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	client.EnableArchiveSearch()
+	client.ArchiveBaseURL = server.URL
+	client.ArchiveRequestGap = 0
+	client.BaseURL = server.URL + "/api/feed/audiobooks/"
+	client.minRequestGap = 0
+	client.HTTP = server.Client()
+
+	outcome, err := client.SearchWithStatus(context.Background(), "Confederacy dunces")
+	if err != nil {
+		t.Fatalf("partial empty search should not fail: %v", err)
+	}
+	if len(outcome.Pairs) != 0 {
+		t.Fatalf("unexpected matches: %#v", outcome.Pairs)
+	}
+	if !strings.Contains(outcome.Warning, "No matching pairs were found in Internet Archive") ||
+		!strings.Contains(outcome.Warning, "LibriVox fallback is temporarily unavailable") {
+		t.Fatalf("unexpected partial-search warning %q", outcome.Warning)
+	}
+	if archiveCalls.Load() != 1 || libriVoxCalls.Load() != 2 {
+		t.Fatalf("Archive calls=%d LibriVox calls=%d", archiveCalls.Load(), libriVoxCalls.Load())
+	}
+}
+
+func TestSearchWithStatusReturnsCleanEmptyWhenBothCatalogsFindNothing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/advancedsearch.php":
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"docs": []any{}}})
+		case "/api/feed/audiobooks/":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Audiobooks could not be found"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	client.EnableArchiveSearch()
+	client.ArchiveBaseURL = server.URL
+	client.ArchiveRequestGap = 0
+	client.BaseURL = server.URL + "/api/feed/audiobooks/"
+	client.minRequestGap = 0
+	client.HTTP = server.Client()
+
+	outcome, err := client.SearchWithStatus(context.Background(), "Confederacy dunces")
+	if err != nil {
+		t.Fatalf("no matches should not be an error: %v", err)
+	}
+	if len(outcome.Pairs) != 0 || outcome.Warning != "" {
+		t.Fatalf("unexpected empty outcome: %#v", outcome)
+	}
+}
+
 func TestArchiveTitleAuthorMatchReturnsEveryAmbiguousText(t *testing.T) {
 	pgCatalog := gzipPGCatalog(t,
 		`45,Text,2008-06-27,Anne of Green Gables,en,"Montgomery, L. M. (Lucy Maud), 1874-1942",Fiction,PZ,Classics`+"\n"+

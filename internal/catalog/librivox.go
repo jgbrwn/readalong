@@ -84,6 +84,13 @@ type Pair struct {
 	TextCandidates []TextCandidate `json:"text_candidates,omitempty"`
 }
 
+// SearchOutcome reports matches and any partial-search caveat when one catalog
+// was available but another catalog could not be checked.
+type SearchOutcome struct {
+	Pairs   []Pair
+	Warning string
+}
+
 type cacheEntry struct {
 	expires time.Time
 	records []Record
@@ -135,35 +142,47 @@ func NewClient() *Client {
 }
 
 func (c *Client) Search(ctx context.Context, query string) ([]Pair, error) {
+	outcome, err := c.SearchWithStatus(ctx, query)
+	return outcome.Pairs, err
+}
+
+func (c *Client) SearchWithStatus(ctx context.Context, query string) (SearchOutcome, error) {
 	query = strings.TrimSpace(query)
 	if len([]rune(query)) < 2 || len([]rune(query)) > 100 || hasControls(query) {
-		return nil, fmt.Errorf("search must be between 2 and 100 characters")
+		return SearchOutcome{}, fmt.Errorf("search must be between 2 and 100 characters")
 	}
 	if c.ArchiveEnabled {
 		archiveCtx, archiveCancel := context.WithTimeout(ctx, archiveSearchTimeout)
 		archivePairs, archiveErr := c.searchArchive(archiveCtx, query)
 		archiveCancel()
 		if archiveErr == nil && len(archivePairs) > 0 {
-			return archivePairs, nil
+			return SearchOutcome{Pairs: archivePairs}, nil
 		}
 		fallbackCtx, cancel := context.WithTimeout(ctx, lvFallbackTimeout)
 		libriVoxPairs, libriVoxErr := c.searchLibriVox(fallbackCtx, query)
 		cancel()
 		if libriVoxErr == nil {
 			if len(libriVoxPairs) > 0 {
-				return libriVoxPairs, nil
+				return SearchOutcome{Pairs: libriVoxPairs}, nil
 			}
 			if archiveErr != nil {
-				return nil, archiveErr
+				return SearchOutcome{
+					Pairs:   []Pair{},
+					Warning: "Internet Archive search was unavailable; LibriVox found no matches, so results may be incomplete.",
+				}, nil
 			}
-			return []Pair{}, nil
+			return SearchOutcome{Pairs: []Pair{}}, nil
 		}
 		if archiveErr != nil {
-			return nil, fmt.Errorf("Internet Archive and LibriVox catalogs are temporarily unavailable")
+			return SearchOutcome{}, fmt.Errorf("Internet Archive and LibriVox catalogs are temporarily unavailable")
 		}
-		return nil, libriVoxErr
+		return SearchOutcome{
+			Pairs:   []Pair{},
+			Warning: "No matching pairs were found in Internet Archive; the LibriVox fallback is temporarily unavailable, so results may be incomplete.",
+		}, nil
 	}
-	return c.searchLibriVox(ctx, query)
+	pairs, err := c.searchLibriVox(ctx, query)
+	return SearchOutcome{Pairs: pairs}, err
 }
 
 func (c *Client) searchLibriVox(ctx context.Context, query string) ([]Pair, error) {

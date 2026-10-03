@@ -94,6 +94,9 @@ import form.
 - The documented LibriVox JSON endpoint is a fallback when IA search is down
   or yields no usable results. It keeps the three-second request gap and has
   an eight-second search deadline so a stalled origin cannot dominate latency.
+- If one catalog returns no matches while the other is unavailable, the search
+  returns an empty result with a warning that the search may be incomplete.
+  Only a failure of both catalogs is presented as a catalog outage.
 - LibriVox returns HTTP 404 with `Audiobooks could not be found` for an empty
   title search; Readalong treats that response as no results, not an outage.
   Transient failures get at most one retry. HTTP 408 and 5xx can retry; 429

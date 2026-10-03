@@ -80,6 +80,41 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	}
 }
 
+func TestPairedSearchReturnsEmptyWithPartialCatalogWarning(t *testing.T) {
+	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/advancedsearch.php":
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"docs": []any{}}})
+		case "/api/feed/audiobooks/":
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer catalogServer.Close()
+
+	client := catalog.NewClient()
+	client.EnableArchiveSearch()
+	client.ArchiveBaseURL = catalogServer.URL
+	client.ArchiveRequestGap = 0
+	client.BaseURL = catalogServer.URL + "/api/feed/audiobooks/"
+	client.HTTP = catalogServer.Client()
+
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound}
+	d, _ := testServer(t, cfg)
+	handler := NewWithCatalog(cfg, d, client)
+	search := request(handler, http.MethodGet, "/api/discovery/pairs?q=Confederacy+dunces",
+		"catalog-user", "reader@example.org", "")
+	if search.Code != http.StatusOK || strings.TrimSpace(search.Body.String()) != "[]" {
+		t.Fatalf("partial no-match search = %d: %s", search.Code, search.Body)
+	}
+	warning := search.Header().Get("X-Readalong-Search-Warning")
+	if !strings.Contains(warning, "No matching pairs were found in Internet Archive") ||
+		!strings.Contains(warning, "LibriVox fallback is temporarily unavailable") {
+		t.Fatalf("unexpected search warning %q", warning)
+	}
+}
+
 func TestInternetArchivePairRequiresChoosingAndConfirmingTextCandidate(t *testing.T) {
 	var pgCatalog bytes.Buffer
 	compressor := gzip.NewWriter(&pgCatalog)

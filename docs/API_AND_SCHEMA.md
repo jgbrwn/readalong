@@ -132,7 +132,10 @@ documented LibriVox API as a bounded fallback. Results identify the audio
 provider and match basis. A Gutenberg ID found in IA `source`/`description`
 metadata is checked against the Project Gutenberg catalog; otherwise exact
 title/creator/language `Type=Text` candidates are returned for explicit user
-review.
+review. The response remains a JSON array. If one catalog returns no matches
+while the other is unavailable, the endpoint returns `200 []` with an
+`X-Readalong-Search-Warning` header explaining that the search may be
+incomplete. If both catalogs are unavailable, it returns a gateway error.
 Archive download URLs are never returned. Results expose `provider`,
 `match_kind` (`source_linked` or `title_author`), and the validated
 `text_candidates` list so the UI can distinguish evidence from suggestions.

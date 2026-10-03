@@ -6,14 +6,21 @@ let pairResults = [];
 let selectedPair = null;
 let retranscriptionTarget = null;
 
-async function api(path, options = {}) {
+async function apiResponse(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const detail = (await response.text()).trim();
     throw new Error(detail || `Request failed (${response.status})`);
   }
   const body = await response.text();
-  return body.trim() ? JSON.parse(body) : null;
+  return {
+    data: body.trim() ? JSON.parse(body) : null,
+    headers: response.headers,
+  };
+}
+
+async function api(path, options = {}) {
+  return (await apiResponse(path, options)).data;
 }
 
 function escapeHTML(value) {
@@ -244,10 +251,12 @@ $('#pairSearchForm').addEventListener('submit', async (event) => {
   $('#pairResults').replaceChildren();
   try {
     const params = new URLSearchParams({ q: query });
-    pairResults = (await api(`/api/discovery/pairs?${params}`)) || [];
+    const search = await apiResponse(`/api/discovery/pairs?${params}`);
+    pairResults = search.data || [];
+    const warning = search.headers.get('X-Readalong-Search-Warning');
     message.textContent = pairResults.length
-      ? `${pairResults.length} free LibriVox ${pairResults.length === 1 ? 'match' : 'matches'} found. Review the text link before importing.`
-      : 'No free LibriVox audio with a suitable Gutenberg text match found. Try a different title.';
+      ? `${pairResults.length} free LibriVox ${pairResults.length === 1 ? 'match' : 'matches'} found. Review the text link before importing.${warning ? ` ${warning}` : ''}`
+      : warning || 'No matching LibriVox audio + Gutenberg pairs found. Try a different title.';
     message.dataset.state = pairResults.length ? 'success' : 'empty';
     $('#pairResults').innerHTML = pairResults.map((pair) => {
       const authors = (pair.authors || []).join(', ');

@@ -48,6 +48,9 @@
 - A LibriVox chapter ZIP is path-safe, naturally ordered, and joins to one MP3.
 - A LibriVox no-result 404 displays an empty result state; transient upstream
   failures retry once without violating the request gap.
+- If one pair-search catalog returns no matches and the other is unavailable,
+  the UI shows the empty result state with a partial-search warning rather
+  than reporting the whole search as unavailable.
 - “Anne Green Gables” finds “Anne of Green Gables” without broadening to titles
   that omit one of the supplied significant words.
 - A slow first attempt on the trailing-phrase query does not cancel its one
