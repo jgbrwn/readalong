@@ -69,6 +69,8 @@ func (s *Server) coverFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
 	case ".jpg", ".jpeg":
 		w.Header().Set("Content-Type", "image/jpeg")
+	case ".png":
+		w.Header().Set("Content-Type", "image/png")
 	default:
 		http.NotFound(w, r)
 		return

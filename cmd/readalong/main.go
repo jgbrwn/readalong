@@ -31,7 +31,7 @@ func main() {
 	}
 	worker := pipeline.New(cfg, d)
 	bookOperations := bookops.New(cfg, d)
-	coverWorker := covers.New(cfg, d, coverai.NewRegistry())
+	coverWorker := covers.New(cfg, d, coverai.NewRegistry(cfg.OpenRouterAPIKey))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	workerDone := make(chan struct{})

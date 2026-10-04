@@ -9,14 +9,15 @@
    title-and-author result may be selected automatically; uncertain matches
    are shown as candidates. YouTube uploader names are not treated as authors.
 4. If no catalog cover is found and the administrator enabled generated
-   covers, ask the selected managed LLM model for a small structured art
-   recipe and render the SVG locally.
+   covers, ask the selected OpenRouter image model to generate a raster cover.
 
 Catalog covers are attributed as catalog suggestions, not guaranteed
 publisher-official editions. Source artwork stays unmodified; Readalong shows
 its provider and verified first-publication year in the shelf/compare UI.
-Generated SVGs typeset the exact book title, trusted author, and known year.
-Unknown years and untrusted uploader names are omitted rather than guessed.
+Generated images receive the exact book title, available author, verified
+publication year, and optionally a sanitized EPUB description. Image models
+render their own illustration and cover typography; unlike legacy SVGs, text
+in generated raster art is not programmatically guaranteed to be exact.
 
 ## Persistent state and backfill
 
@@ -74,36 +75,33 @@ cover corpus:
 - Open Library API usage: https://openlibrary.org/developers/api
 - Open Library Covers API: https://openlibrary.org/dev/docs/api/covers
 
-## Generated fallback and Reflection models
+## Generated image covers
 
-The admin panel discovers the attached `type=llm` integration from Reflection,
-then reads its OpenAI-compatible `/v1/models` list. It includes text-output
-models from OpenAI/ChatGPT, Neuralwatt, and OpenRouter; OpenRouter modality
-metadata and provider pricing are normalized. Models without explicit
-text-output metadata remain selectable as inferred candidates and are marked
-“check required.” The six-hour cache serves stale results if discovery is
-temporarily unavailable.
+AI generation uses OpenRouter's dedicated Images API directly. The attached
+exe.dev LLM gateway currently does not expose the requested image-model set or
+the dedicated image endpoint, so `OPENROUTER_API_KEY` must be configured in the
+private `.env`. The admin picker offers GPT Image 2 (default), Seedream 4.5,
+and FLUX.2 Pro; it has no text-model search or API-format setting.
 
-The API format defaults to **Auto**. The model's advertised metadata/gateway
-selects the preferred Responses or Chat Completions API; it tries the alternate
-after an endpoint rejection or a successful response without a valid design
-recipe, but not for auth, billing, rate-limit, refusal, or truncation failures.
-The health check
-understands Responses SSE text deltas (including gateways whose final response
-omits accumulated output) and Chat Completions string or multipart text. It
-uses a bounded output budget and applies “no reasoning” only when the model
-advertises that option. Failures distinguish provider limits/credits,
-unsupported endpoints, truncation, refusals, and no-text responses. Checks
-remain explicit and may consume quota.
+The prompt asks the image model to identify the actual work from its literary
+knowledge, title, author, verified publication year, and optional short EPUB
+description metadata. It requests a polished portrait cover with exact title
+and author typography and story-specific characters/settings. For *Little
+Women*, it explicitly calls for Meg, Jo, Beth, and Amy as the central subject,
+not a generic flower. Only bounded bibliographic metadata is sent—never
+chapters, audio, user identity, or source URLs.
 
-The selected model is prompted to identify the literary work using its title,
-author, known story context, verified publication year, and optional short EPUB
-description metadata. It returns a strict subject-motif/color recipe; for
-example, *Little Women* calls for four sister figures, not a generic flower.
-Readalong validates that recipe and renders it with a local, fixed library of
-script-free vector motifs. Vision input and native image output are separate
-capabilities and neither is required. Arbitrary model-authored SVG/HTML, URLs,
-scripts, and file paths are never accepted.
+OpenRouter returns base64 raster output. Readalong accepts PNG/JPEG only,
+checks decoded image dimensions and portrait proportions, flattens any
+transparency, normalizes to JPEG, and writes the artifact atomically. Provider
+output is never treated as markup, a URL, or a file path. Requests are not
+automatically retried after ambiguous failures, preventing accidental duplicate
+charges.
+
+The picker warns when the private API key is missing. Each generation is
+billable under the selected OpenRouter model and output settings. Existing
+generated SVG covers remain available as legacy artifacts, but all newly
+generated covers are raster images.
 Local mutable cover previews use opaque versioned URLs and no-store responses
 so a regenerated candidate cannot be mistaken for a cached older image.
 

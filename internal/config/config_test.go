@@ -46,18 +46,30 @@ func TestLoopbackAddrIsFixedAndPortConfigurable(t *testing.T) {
 func TestStripDeploymentSecrets(t *testing.T) {
 	for _, key := range []string{
 		"GROQ_API_KEY", "CLOUDFLARE_API_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
-		"R2_SECRET_ACCESS_KEY", "R2_ENDPOINT",
+		"R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "OPENROUTER_API_KEY",
 	} {
 		t.Setenv(key, "test-secret")
 	}
 	stripDeploymentSecrets()
 	for _, key := range []string{
 		"GROQ_API_KEY", "CLOUDFLARE_API_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
-		"R2_SECRET_ACCESS_KEY", "R2_ENDPOINT",
+		"R2_SECRET_ACCESS_KEY", "R2_ENDPOINT", "OPENROUTER_API_KEY",
 	} {
 		if _, ok := os.LookupEnv(key); ok {
 			t.Errorf("%s remains in application environment", key)
 		}
+	}
+}
+
+func TestLoadCapturesOpenRouterKeyBeforeStrippingEnvironment(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+	cfg := Load()
+	if cfg.OpenRouterAPIKey != "test-openrouter-key" {
+		t.Fatal("OpenRouter key was not captured in application config")
+	}
+	if _, ok := os.LookupEnv("OPENROUTER_API_KEY"); ok {
+		t.Fatal("OpenRouter key remained in the process environment")
 	}
 }
 

@@ -8,8 +8,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/jgbrwn/readalong/internal/auth"
 	"github.com/jgbrwn/readalong/internal/catalog"
@@ -21,14 +19,12 @@ import (
 )
 
 type Server struct {
-	cfg          config.Config
-	db           *db.DB
-	pipeline     *pipeline.Service
-	catalog      *catalog.Client
-	coverAI      coverModelRegistry
-	mux          *http.ServeMux
-	modelCheckMu sync.Mutex
-	modelCheckAt map[string]time.Time
+	cfg      config.Config
+	db       *db.DB
+	pipeline *pipeline.Service
+	catalog  *catalog.Client
+	coverAI  coverai.ImageGenerator
+	mux      *http.ServeMux
 }
 
 func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler {
@@ -42,22 +38,22 @@ func New(cfg config.Config, d *db.DB, workers ...*pipeline.Service) http.Handler
 }
 
 func NewWithCatalog(cfg config.Config, d *db.DB, catalogClient *catalog.Client, workers ...*pipeline.Service) http.Handler {
-	return newWithCatalogAndCoverAI(cfg, d, catalogClient, coverai.NewRegistry(), workers...)
+	cfg = cfg.Normalize()
+	return newWithCatalogAndCoverAI(cfg, d, catalogClient, coverai.NewRegistry(cfg.OpenRouterAPIKey), workers...)
 }
 
 func newWithCatalogAndCoverAI(cfg config.Config, d *db.DB, catalogClient *catalog.Client,
-	modelRegistry coverModelRegistry, workers ...*pipeline.Service,
+	modelRegistry coverai.ImageGenerator, workers ...*pipeline.Service,
 ) http.Handler {
 	cfg = cfg.Normalize()
 	if catalogClient == nil {
 		catalogClient = catalog.NewClient()
 	}
 	if modelRegistry == nil {
-		modelRegistry = coverai.NewRegistry()
+		modelRegistry = coverai.NewRegistry(cfg.OpenRouterAPIKey)
 	}
 	s := &Server{
 		cfg: cfg, db: d, mux: http.NewServeMux(), coverAI: modelRegistry,
-		modelCheckAt: make(map[string]time.Time),
 	}
 	s.catalog = catalogClient
 	if len(workers) > 0 {
@@ -91,9 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/admin/book-operations", s.createAdminBookOperation)
 	s.mux.HandleFunc("GET /api/admin/book-operations/{id}", s.getAdminBookOperation)
 	s.mux.HandleFunc("GET /api/admin/cover-ai", s.getCoverAISettings)
-	s.mux.HandleFunc("POST /api/admin/cover-ai/refresh", s.refreshCoverAIModels)
 	s.mux.HandleFunc("PUT /api/admin/cover-ai", s.saveCoverAISettings)
-	s.mux.HandleFunc("POST /api/admin/cover-ai/check", s.checkCoverAIModel)
 	sub, _ := fs.Sub(webui.Static, "static")
 	fileServer := http.FileServer(http.FS(sub))
 	s.mux.HandleFunc("GET /manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {

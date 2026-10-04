@@ -129,7 +129,7 @@
 - EPUB2 and EPUB3 declared covers extract and normalize; undeclared decorative
   images, SVG payloads, oversized images, and unsafe archive paths are rejected.
 - Disabling external catalog searches does not suppress local EPUB/audio
-  artwork extraction or an explicitly enabled local SVG fallback.
+  artwork extraction or explicitly enabled OpenRouter image-cover generation.
 - Attached audio artwork is extracted only from ffprobe streams marked
   `attached_pic`; arbitrary video frames are not used as jackets.
 - Open Library matches are title/author scored; only exact title and a
@@ -145,24 +145,29 @@
   alter book readiness or transcription jobs.
 - A ready owner can manually queue one cover regeneration at a time; current
   selection remains visible while catalog and fresh AI candidates are prepared.
-- Regeneration can offer both catalog and newly generated SVG options; choosing
+- Regeneration can offer both catalog and newly generated raster image options; choosing
   either updates selection, removes stale candidates, and pauses polling until
   the owner manually regenerates again.
 - Clone/transfer remaps and copies pending AI candidate assets as well as the
   selected and catalog cover files.
-- Generated cover recipes accept only a fixed literary motif and validated
-  colors; Readalong renders escaped SVG locally and rejects model-authored markup.
-- The Little Women fixture requests four distinct sister figures and excludes
-  generic botanical ornamentation.
-- Reflection discovery includes text-output candidates across OpenAI/ChatGPT,
-  Neuralwatt, and OpenRouter; normalizes modalities and pricing, deduplicates
-  OpenAI aliases, and serves stale cache data on discovery failure.
-- Auto API checks use valid Responses input and parse SSE deltas as well as
-  Chat Completions string/multipart text; endpoint fallback, truncation,
-  no-text, quota/auth, refusal, and provider-rate-limit outcomes are distinct.
-- Live managed-gateway smoke checks exercise one OpenAI Responses model, one
-  Neuralwatt Chat Completions model, and one OpenRouter Chat Completions model;
-  temporary upstream rate limits remain unhealthy, not false positives.
+- The picker exposes exactly OpenAI GPT Image 2 (default), Seedream 4.5, and
+  FLUX.2 Pro, rejects other model IDs, and explains missing OpenRouter setup.
+- Image prompts preserve the exact book title/author, strip recording labels
+  from cover typography, include verified publication year and optional
+  sanitized EPUB description, and direct *Little Women* toward its four sisters.
+- OpenRouter image requests use one image, portrait 2:3, and supported
+  model-specific parameters; API keys never enter logs, responses, or subprocess
+  environments.
+- Image response size, base64, media type, format, dimensions, pixel count, and
+  portrait ratio are checked; SVG/HTML, remote URLs, malformed data, and
+  oversized assets are rejected before atomic storage.
+- Existing SVG covers remain owner-scoped and readable; new candidates are
+  normalized JPEGs and retain versioned no-store URLs. Candidate choice,
+  current-cover preservation, and clone/transfer work for both asset formats.
+- Provider 401/402/429, malformed output, and timeouts do not trigger fallback
+  models or automatic retries that could duplicate image charges.
+- Live OpenRouter image generation requires account credits; smoke-test each
+  configured model after funding, and record returned usage/cost.
 
 ## Admin book clone/transfer
 

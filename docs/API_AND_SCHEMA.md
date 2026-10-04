@@ -93,10 +93,11 @@ storing another plaintext copy of their queries.
 
 ### app_settings and admin_book_operations
 
-`app_settings` stores the sanitized managed-model inventory and admin-selected
-cover settings. `admin_book_operations` is a separate durable queue/audit
-record for admin-initiated clone/transfer operations; it is intentionally not
-stored in the transcription `jobs` queue.
+`app_settings` stores the admin-selected OpenRouter image model and cover
+settings. Legacy managed-text-model cache entries are no longer used.
+`admin_book_operations` is a separate durable queue/audit record for
+admin-initiated clone/transfer operations; it is intentionally not stored in
+the transcription `jobs` queue.
 
 ## API surface
 
@@ -125,9 +126,7 @@ GET    /api/admin/users/:user_id/books
 POST   /api/admin/book-operations
 GET    /api/admin/book-operations/:operation_id
 GET    /api/admin/cover-ai
-POST   /api/admin/cover-ai/refresh
 PUT    /api/admin/cover-ai
-POST   /api/admin/cover-ai/check
 ```
 
 Mutating API requests require a same-origin `Origin` header. All book-specific
@@ -163,26 +162,23 @@ replacement/lookup; “Not now” leaves suggestions available for later review.
 enabled, a new AI design. The current cover remains selected until the owner
 chooses among the current cover and returned suggestions.
 
-Admin cover settings discover/cache text-output models through Reflection,
-including OpenAI/ChatGPT, Neuralwatt, and OpenRouter entries. Models without
-explicit text-output metadata are shown as inferred candidates and require a
-health check. Vision
-means image input, not image output; neither is required for the recipe-based
-local SVG renderer. The model check defaults to Auto: it tries the catalog's
-preferred Responses or Chat Completions endpoint and tries the alternate after
-an endpoint rejection or an accepted response without a valid design recipe.
-It does not retry authentication, billing, rate-limit, refusal, or truncation
-failures. Responses streaming and Chat Completions text formats are both
-parsed. `GET` serves the six-hour cached inventory;
-`POST /api/admin/cover-ai/refresh` refreshes it. `PUT` saves the global catalog
-lookup switch, description-sharing preference, model ID, API style, and
-optional generation switch. Generation asks the selected model to use its
-knowledge of the work and return one whitelisted story motif plus a palette;
-Readalong renders that motif from safe local SVG templates. For example,
-*Little Women* uses four sister figures rather than an unrelated decorative
-flower. The health check is explicit and rate-limited per model; model listing
-itself never runs inference. Checks and generated designs can consume provider
-quota.
+Admin cover settings expose exactly three direct OpenRouter image models:
+OpenAI GPT Image 2 (default), ByteDance Seedream 4.5, and Black Forest Labs
+FLUX.2 Pro. The API key is read from the private `OPENROUTER_API_KEY`
+environment setting and is never returned to clients. Generation uses
+OpenRouter's Images API; it does not use the exe.dev LLM gateway's text/chat
+routes. `GET /api/admin/cover-ai` returns the fixed picker choices and whether
+the key is configured; `PUT` saves the catalog-lookup switch,
+description-sharing preference, model ID, and image-generation switch.
+
+Each request creates one portrait cover image. The prompt includes the
+work's title, author, verified publication year, and optional sanitized EPUB
+description; it sends no chapter text, audio, account data, or source URLs.
+OpenRouter returns base64 raster data, which is bounded, decoded, dimension-
+checked, flattened, and normalized to JPEG before the artifact is atomically
+stored. SVG/HTML, URLs, scripts, and model-authored markup are rejected.
+Requests are not automatically retried after ambiguous provider failures, to
+avoid accidental duplicate charges.
 
 ### Admin book operations
 

@@ -118,7 +118,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 	if err := d.SetCoverRegenerationResults(ctx, task, &CoverSuggestion{
 		URL:       "https://covers.openlibrary.org/b/id/99-M.jpg",
 		SourceURL: "https://openlibrary.org/works/OL99W", Year: 1935,
-	}, "books/cover-owner/regenerate-book/cover/generated-new.svg", 1935,
+	}, "books/cover-owner/regenerate-book/cover/generated-new.jpg", 1935,
 		now.Format(time.RFC3339), "", "found"); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 		t.Fatal(err)
 	}
 	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
-	if err != nil || book.CoverKind != "ai_svg" ||
+	if err != nil || book.CoverKind != "ai_image" ||
 		!strings.HasPrefix(book.CoverURL, "/api/books/regenerate-book/cover/selected?v=") ||
 		book.CoverReviewNeeded || book.CoverAICandidateURL != "" {
 		t.Fatalf("new AI cover was not selected cleanly: book=%#v err=%v", book, err)

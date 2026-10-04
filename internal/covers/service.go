@@ -33,14 +33,14 @@ var errOpenLibraryDailyLimit = errors.New("Open Library daily search limit reach
 type Service struct {
 	cfg     config.Config
 	db      *db.DB
-	models  *coverai.Registry
+	models  coverai.ImageGenerator
 	catalog *OpenLibrary
 }
 
-func New(cfg config.Config, database *db.DB, models *coverai.Registry) *Service {
+func New(cfg config.Config, database *db.DB, models coverai.ImageGenerator) *Service {
 	cfg = cfg.Normalize()
 	if models == nil {
-		models = coverai.NewRegistry()
+		models = coverai.NewRegistry(cfg.OpenRouterAPIKey)
 	}
 	return &Service{
 		cfg: cfg, db: database, models: models,
@@ -59,7 +59,7 @@ func (s *Service) Run(ctx context.Context) {
 		if err != nil {
 			log.Printf("readalong: cover reconciliation queue unavailable")
 		} else if found {
-			taskContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			taskContext, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			s.process(taskContext, task)
 			cancel()
 			continue
@@ -214,7 +214,7 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 	}
 	if found {
 		reliableAuthor := trustedCoverAuthor(task) != ""
-		if task.SelectedKind == "ai_svg" || !candidate.TitleExact ||
+		if task.SelectedKind == "ai_svg" || task.SelectedKind == "ai_image" || !candidate.TitleExact ||
 			(reliableAuthor && candidate.AuthorOverlap < 0.75) || !reliableAuthor {
 			_ = s.db.SetCoverCandidate(ctx, task, candidate.ImageURL, candidate.SourceURL, candidate.Year)
 			return
@@ -281,21 +281,27 @@ func (s *Service) processRegeneration(ctx context.Context, task db.CoverTask, se
 		if settings.UseBookDescription {
 			description = task.BookDescription
 		}
-		image, err := s.models.GenerateVectorCover(ctx, settings.ModelID, settings.APIStyle,
-			task.Title, trustedCoverAuthor(task), description, aiYear)
+		image, err := s.models.GenerateCoverImage(ctx, settings.ModelID, coverai.CoverDetails{
+			Title: task.Title, Author: coverPromptAuthor(task), Description: description, Year: aiYear,
+		})
 		if err == nil {
-			filename := filepath.Join(pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID),
-				"cover", fmt.Sprintf("generated-regenerated-%d.svg", time.Now().UTC().UnixNano()))
-			if err := writeAtomic(filename, image); err == nil {
-				if relative, err := filepath.Rel(s.cfg.DataDir, filename); err == nil {
+			if image.Extension != "jpg" || len(image.Bytes) == 0 {
+				err = fmt.Errorf("generated image had an unsupported format")
+			} else {
+				filename := filepath.Join(pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID),
+					"cover", fmt.Sprintf("generated-regenerated-%d.jpg", time.Now().UTC().UnixNano()))
+				if writeErr := writeAtomic(filename, image.Bytes); writeErr != nil {
+					err = fmt.Errorf("generated image could not be saved")
+				} else if relative, relErr := filepath.Rel(s.cfg.DataDir, filename); relErr == nil {
 					aiPath = relative
 				} else {
 					_ = os.Remove(filename)
+					err = fmt.Errorf("generated image path could not be prepared")
 				}
 			}
 		}
 		if err != nil {
-			log.Printf("readalong: regenerated cover design failed")
+			log.Printf("readalong: regenerated image cover failed")
 		}
 	}
 
@@ -315,8 +321,9 @@ func (s *Service) generateFallback(ctx context.Context, task db.CoverTask, setti
 	if settings.UseBookDescription {
 		description = task.BookDescription
 	}
-	cover, err := s.models.GenerateVectorCover(ctx, settings.ModelID, settings.APIStyle,
-		task.Title, trustedCoverAuthor(task), description, year)
+	cover, err := s.models.GenerateCoverImage(ctx, settings.ModelID, coverai.CoverDetails{
+		Title: task.Title, Author: coverPromptAuthor(task), Description: description, Year: year,
+	})
 	if err != nil {
 		log.Printf("readalong: generated cover design failed")
 		if nextCheckAt == "" {
@@ -328,8 +335,17 @@ func (s *Service) generateFallback(ctx context.Context, task db.CoverTask, setti
 	}
 	bookDir := pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID)
 	coverDir := filepath.Join(bookDir, "cover")
-	filename := filepath.Join(coverDir, "generated.svg")
-	if err := writeAtomic(filename, cover); err != nil {
+	if cover.Extension != "jpg" || len(cover.Bytes) == 0 {
+		log.Printf("readalong: generated image cover had an unsupported format")
+		if nextCheckAt == "" {
+			_ = s.db.RetryCoverTaskAt(ctx, task, time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339))
+		} else {
+			_ = s.db.ReleaseCoverTask(ctx, task)
+		}
+		return
+	}
+	filename := filepath.Join(coverDir, "generated.jpg")
+	if err := writeAtomic(filename, cover.Bytes); err != nil {
 		log.Printf("readalong: generated cover could not be saved")
 		if nextCheckAt == "" {
 			_ = s.db.RetryCoverTaskAt(ctx, task, time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339))
@@ -471,24 +487,20 @@ func (s *Service) coverAISettings(ctx context.Context) (coverai.Settings, error)
 		return coverai.Settings{}, err
 	}
 	if !found {
-		return coverai.Settings{
-			APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
-			CatalogLookupEnabled: true, UseBookDescription: true,
-		}, nil
+		return coverai.DefaultSettings(s.models.Configured()), nil
 	}
 	var settings coverai.Settings
 	if err := json.Unmarshal([]byte(setting.Value), &settings); err != nil {
 		return coverai.Settings{}, fmt.Errorf("cover settings are invalid")
 	}
-	if settings.APIStyleVersion < coverai.CurrentSettingsVersion {
-		settings.APIStyle = coverai.APIAuto
-		settings.APIStyleVersion = coverai.CurrentSettingsVersion
+	return coverai.NormalizeSettings(settings, s.models.Configured()), nil
+}
+
+func coverPromptAuthor(task db.CoverTask) string {
+	if author := strings.TrimSpace(task.EPUBAuthor); author != "" {
+		return author
 	}
-	if settings.APIStyle != coverai.APIAuto && settings.APIStyle != coverai.APIResponses &&
-		settings.APIStyle != coverai.APIChat {
-		settings.APIStyle = coverai.APIAuto
-	}
-	return settings, nil
+	return strings.TrimSpace(task.Author)
 }
 
 func nextNegativeCheck(previous int, now time.Time) time.Time {

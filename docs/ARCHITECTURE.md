@@ -16,7 +16,7 @@ Go app on dedicated exe.dev VM
    |- Internet Archive LibriVox catalog (throttled/cache), LibriVox API fallback
    |- Project Gutenberg catalog snapshot + Archive.org approved source fetch
    |- Open Library cover search/cache (throttled, title/author only)
-   |- Reflection-discovered managed LLM catalog for optional SVG cover design
+   |- Direct OpenRouter Images API for optional raster cover generation
    `- background worker
 
 Optional future durable layer (Phase 3; not enabled by default)
@@ -76,11 +76,11 @@ data/
     alignment.v1.json.gz
     cover/epub.jpg
     cover/audio.jpg
-    cover/generated.svg
+    cover/generated.jpg
     work/
 ```
 
-Large word arrays do not belong in SQLite. SQLite stores metadata, state, paths, checksums, and summaries; compressed JSON stores transcript/alignment payloads.
+Large word arrays do not belong in SQLite. SQLite stores metadata, state, paths, checksums, and summaries; compressed JSON stores transcript/alignment payloads. Existing generated SVG covers remain readable for backwards compatibility; all new AI covers are raster images.
 
 When configured, R2 should mirror the same logical object tree. The app should
 not depend on R2 to serve playback in v1; this keeps the runtime simple and

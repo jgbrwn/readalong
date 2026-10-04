@@ -72,31 +72,19 @@
       </section>
       <section id="adminCoverAI" class="admin-section" hidden>
         <h2>Cover artwork model</h2>
-        <p class="muted">Readalong discovers text-generating models through the VM’s managed LLM integration. The model returns a small design recipe; Readalong renders the SVG locally, so vision or native image generation is not required. Cover design sends only title, author, short EPUB description metadata (if present), and a verified year—not audio or chapter text.</p>
+        <p class="muted">Readalong generates real cover images through OpenRouter’s Images API. The prompt uses the book’s title, author, verified publication year, and—if enabled—a short EPUB description. Audio, chapters, account details, and source URLs are never sent.</p>
         <div class="cover-ai-controls">
           <label class="admin-checkbox">
             <input id="enableCoverLookup" type="checkbox">
             <span>Automatically search public catalogs for covers. Only book title and author are sent; audio and ebook contents are not. Cover images load directly from Open Library when shown.</span>
           </label>
-          <label for="coverAIModelFilter">Find a design model</label>
-          <input id="coverAIModelFilter" type="search" placeholder="Search model or provider" autocomplete="off">
-          <select id="coverAIModel" disabled><option value="">Refresh models to choose</option></select>
-          <label for="coverAIAPIStyle">API format</label>
-          <select id="coverAIAPIStyle">
-            <option value="auto">Auto-detect (recommended)</option>
-            <option value="responses">Responses API</option>
-            <option value="chat_completions">Chat Completions API</option>
-          </select>
-          <p class="fine-print">Auto tries the preferred endpoint, then the alternate if needed. It does not retry authentication, billing, rate-limit, refusal, or truncated-output failures. A successful check selects the working API format; save settings to keep it.</p>
+          <label for="coverAIModel">Image-generation model</label>
+          <select id="coverAIModel"><option value="">Loading image models…</option></select>
           <p id="coverAIModelInfo" class="muted"></p>
-          <p class="fine-print">“Check model” sends a tiny request to the selected provider. It can consume a small amount of quota and can reveal rate limits or credit exhaustion.</p>
-          <div class="admin-actions">
-            <button id="refreshCoverModels" class="button button-quiet" type="button">Refresh models</button>
-            <button id="checkCoverModel" class="button button-quiet" type="button" disabled>Check model</button>
-          </div>
+          <p class="fine-print">Each generated cover is a billable OpenRouter image request. The OpenRouter key stays on the server; set it as <code>OPENROUTER_API_KEY</code> in the private <code>.env</code> file.</p>
           <label class="admin-checkbox">
             <input id="enableCoverAI" type="checkbox">
-            <span>Generate a designed vector cover when no catalog cover is found</span>
+            <span>Generate an AI image cover when no catalog cover is found</span>
           </label>
           <label class="admin-checkbox">
             <input id="includeCoverDescription" type="checkbox">

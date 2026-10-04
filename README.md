@@ -27,7 +27,7 @@ private.
 - Search your bookshelf by title or author.
 - Sort your bookshelf by recently added, title, author, recently read, or progress.
 - Extract cover artwork from EPUB/audio sources, review catalog cover matches,
-  and optionally generate a locally rendered SVG cover. Regenerate a cover to
+  and optionally generate a raster image cover. Regenerate a cover to
   rerun discovery/design and choose between the current, catalog, and AI cover.
 - Search free LibriVox audio on Internet Archive and match it to Project
   Gutenberg text. Prefer source-linked IDs; when IA omits one, show exact
@@ -116,11 +116,11 @@ Project Gutenberg metadata catalog weekly. Audio and the selected EPUB are
 downloaded into the private library only after the user confirms an import.
 When cover lookup is enabled, Readalong sends only title/author metadata to
 Open Library; audio and ebook text are not sent. Catalog cover images load
-directly from Open Library when visible. Optional generated cover design sends
+directly from Open Library when visible. Optional AI cover generation sends
 title/author, a verified publication year, and (if enabled) short EPUB
-description metadata to the managed LLM integration. It requests a
-story-specific motif and palette, then renders the SVG locally; chapters and
-audio are never sent.
+description metadata to OpenRouter's Images API using the selected image model.
+It sends no chapters, audio, account data, or source URLs and requires a private
+`OPENROUTER_API_KEY` in `.env`.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and

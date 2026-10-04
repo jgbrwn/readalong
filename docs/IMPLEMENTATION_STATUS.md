@@ -60,12 +60,11 @@ Implemented first passes:
   caching, persisted retry/backoff, and owner-checked local image serving;
 - catalog-cover review that never silently replaces a selected generated
   cover; choosing to keep the generated cover pauses future automatic checks;
-- optional AI-designed SVG fallback. Reflection discovers text-output models
-  across OpenAI/ChatGPT, Neuralwatt, and OpenRouter, caches a sanitized
-  capability/pricing list, and provides searchable selection, Auto API
-  detection/fallback, and a live health check. The selected LLM uses work
-  context to choose a whitelisted story motif and palette; Readalong renders
-  the SVG locally (including four distinct sisters for *Little Women*);
+- optional AI-generated raster covers. The admin picker offers OpenAI GPT
+  Image 2 by default, ByteDance Seedream 4.5, and Black Forest Labs FLUX.2 Pro.
+  Readalong calls OpenRouter's Images API directly with a private server-side
+  key, sends bounded book metadata, validates/normalizes raster output, and
+  stores owner-scoped JPEGs; legacy SVG covers remain readable;
 - per-book cover regeneration. The owner can rerun catalog discovery and
   generate a fresh AI candidate while keeping the selected cover, then choose
   the current, catalog, or generated cover;

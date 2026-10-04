@@ -20,6 +20,7 @@ type Config struct {
 	AdminUserIDs         map[string]bool
 	AdminBootstrapEmails map[string]bool
 	GroqAPIKey           string
+	OpenRouterAPIKey     string
 	GroqModel            string
 	GroqLanguage         string
 	GroqChunkSeconds     int
@@ -46,6 +47,7 @@ func Load() Config {
 		AdminUserIDs:         csvSet(os.Getenv("ADMIN_USER_IDS")),
 		AdminBootstrapEmails: lowerSet(os.Getenv("ADMIN_BOOTSTRAP_EMAILS")),
 		GroqAPIKey:           os.Getenv("GROQ_API_KEY"),
+		OpenRouterAPIKey:     strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
 		GroqModel:            env("GROQ_MODEL", "whisper-large-v3-turbo"),
 		GroqLanguage:         env("GROQ_LANGUAGE", "en"),
 		GroqChunkSeconds:     envInt("GROQ_CHUNK_SECONDS", 480),
@@ -79,7 +81,7 @@ func (c Config) Normalize() Config {
 // inherited by ffmpeg, ffprobe, yt-dlp, or other child processes.
 func stripDeploymentSecrets() {
 	for _, key := range []string{
-		"GROQ_API_KEY", "CLOUDFLARE_API_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
+		"GROQ_API_KEY", "OPENROUTER_API_KEY", "CLOUDFLARE_API_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
 		"R2_SECRET_ACCESS_KEY", "R2_ENDPOINT",
 	} {
 		_ = os.Unsetenv(key)

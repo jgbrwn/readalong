@@ -6,6 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -31,22 +33,6 @@ func testServer(t *testing.T, cfg config.Config) (*db.DB, http.Handler) {
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	return d, New(cfg, d)
-}
-
-type fakeCoverModelRegistry struct {
-	models  []coverai.Model
-	check   coverai.CheckResult
-	lastID  string
-	lastAPI coverai.APIStyle
-}
-
-func (f *fakeCoverModelRegistry) Discover(context.Context) ([]coverai.Model, error) {
-	return f.models, nil
-}
-
-func (f *fakeCoverModelRegistry) CheckModel(_ context.Context, id string, api coverai.APIStyle) (coverai.CheckResult, error) {
-	f.lastID, f.lastAPI = id, api
-	return f.check, nil
 }
 
 func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
@@ -97,16 +83,7 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	}
 }
 
-func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
-	registry := &fakeCoverModelRegistry{
-		models: []coverai.Model{{
-			ID: "neuralwatt/qwen-vision", Name: "Qwen vision", Provider: "Neuralwatt",
-			APIStyle: coverai.APIChat, Vision: true, TextOutput: true,
-		}},
-		check: coverai.CheckResult{
-			Healthy: true, Message: "Model is responding.", APIStyle: coverai.APIChat, LatencyMS: 15,
-		},
-	}
+func TestAdminCoverImageModelSettingsAreFixedAndDefaultToGPTImage2(t *testing.T) {
 	cfg := config.Config{
 		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
 		AdminUserIDs: map[string]bool{"admin-id": true},
@@ -116,45 +93,60 @@ func TestAdminCoverModelDiscoverySettingsAndHealthCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	legacySettings, err := json.Marshal(coverai.Settings{
-		Enabled: true, ModelID: "neuralwatt/qwen-vision", APIStyle: coverai.APIResponses,
-	})
-	if err != nil {
+	if err := d.SetAppSetting(context.Background(), coverAISettingsKey,
+		`{"enabled":true,"model_id":"neuralwatt/qwen-vision","api_style":"responses","catalog_lookup_enabled":true}`); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.SetAppSetting(context.Background(), coverAISettingsKey, string(legacySettings)); err != nil {
-		t.Fatal(err)
-	}
-	handler := newWithCatalogAndCoverAI(cfg, d, nil, registry)
+	handler := newWithCatalogAndCoverAI(cfg, d, nil, coverai.NewRegistry("test-key"))
 
 	denied := request(handler, http.MethodGet, "/api/admin/cover-ai", "reader-id", "reader@example.org", "")
 	if denied.Code != http.StatusNotFound {
 		t.Fatalf("non-admin cover settings status = %d", denied.Code)
 	}
 	admin := request(handler, http.MethodGet, "/api/admin/cover-ai", "admin-id", "admin@example.org", "")
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"neuralwatt/qwen-vision"`) ||
-		!strings.Contains(admin.Body.String(), `"api_style":"auto"`) {
-		t.Fatalf("admin cover model catalog = %d: %s", admin.Code, admin.Body)
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"id":"openai/gpt-image-2"`) ||
+		!strings.Contains(admin.Body.String(), `"bytedance-seed/seedream-4.5"`) ||
+		!strings.Contains(admin.Body.String(), `"black-forest-labs/flux.2-pro"`) ||
+		!strings.Contains(admin.Body.String(), `"model_id":"openai/gpt-image-2"`) ||
+		!strings.Contains(admin.Body.String(), `"openrouter_configured":true`) ||
+		strings.Contains(admin.Body.String(), `"api_style"`) {
+		t.Fatalf("admin image model picker = %d: %s", admin.Code, admin.Body)
 	}
 
 	saved := request(handler, http.MethodPut, "/api/admin/cover-ai", "admin-id", "admin@example.org",
-		`{"enabled":true,"model_id":"neuralwatt/qwen-vision","api_style":"chat_completions"}`)
+		`{"enabled":true,"model_id":"bytedance-seed/seedream-4.5","catalog_lookup_enabled":true}`)
 	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"enabled":true`) {
 		t.Fatalf("cover settings save = %d: %s", saved.Code, saved.Body)
 	}
 	invalid := request(handler, http.MethodPut, "/api/admin/cover-ai", "admin-id", "admin@example.org",
-		`{"enabled":true,"model_id":"unlisted/model","api_style":"responses"}`)
+		`{"enabled":true,"model_id":"unlisted/model"}`)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("unlisted model accepted: %d %s", invalid.Code, invalid.Body)
 	}
+}
 
-	checked := request(handler, http.MethodPost, "/api/admin/cover-ai/check", "admin-id", "admin@example.org",
-		`{"model_id":"neuralwatt/qwen-vision","api_style":"chat_completions"}`)
-	if checked.Code != http.StatusOK || !strings.Contains(checked.Body.String(), `"healthy":true`) {
-		t.Fatalf("model health check = %d: %s", checked.Code, checked.Body)
+func TestAdminImageCoverSettingsExplainMissingOpenRouterKey(t *testing.T) {
+	cfg := config.Config{
+		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
+		AdminUserIDs: map[string]bool{"admin-id": true},
 	}
-	if registry.lastID != "neuralwatt/qwen-vision" || registry.lastAPI != coverai.APIChat {
-		t.Fatalf("wrong model check route: id=%q api=%q", registry.lastID, registry.lastAPI)
+	d, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	handler := newWithCatalogAndCoverAI(cfg, d, nil, coverai.NewRegistry())
+	response := request(handler, http.MethodGet, "/api/admin/cover-ai", "admin-id", "admin@example.org", "")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"openrouter_configured":false`) ||
+		!strings.Contains(response.Body.String(), "OPENROUTER_API_KEY") ||
+		!strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("missing OpenRouter key was not explained: %d %s", response.Code, response.Body)
+	}
+	save := request(handler, http.MethodPut, "/api/admin/cover-ai", "admin-id", "admin@example.org",
+		`{"enabled":true,"model_id":"openai/gpt-image-2"}`)
+	if save.Code != http.StatusServiceUnavailable {
+		t.Fatalf("image generation enabled without API key: %d %s", save.Code, save.Body)
 	}
 }
 
@@ -280,17 +272,19 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 	}
 	coverDir := pipeline.BookDirectory(cfg.Normalize().DataDir, "cover-owner", "cover-book")
 	coverPath := filepath.Join(coverDir, "cover", "generated.svg")
-	aiCandidatePath := filepath.Join(coverDir, "cover", "generated-review.svg")
-	for path, body := range map[string]string{
-		coverPath:       `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
-		aiCandidatePath: `<svg xmlns="http://www.w3.org/2000/svg"><text>candidate</text></svg>`,
-	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-			t.Fatal(err)
-		}
+	aiCandidatePath := filepath.Join(coverDir, "cover", "generated-review.jpg")
+	if err := os.MkdirAll(filepath.Dir(coverPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coverPath, []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var jpegBytes bytes.Buffer
+	if err := jpeg.Encode(&jpegBytes, image.NewRGBA(image.Rect(0, 0, 768, 1152)), &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aiCandidatePath, jpegBytes.Bytes(), 0600); err != nil {
+		t.Fatal(err)
 	}
 	relative, err := filepath.Rel(cfg.Normalize().DataDir, coverPath)
 	if err != nil {
@@ -321,7 +315,7 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 		"cover-owner", "owner@example.org", "")
 	outsiderAICandidate := request(handler, http.MethodGet, "/api/books/cover-book/cover/ai-candidate",
 		"cover-outsider", "other@example.org", "")
-	if ownerAICandidate.Code != http.StatusOK ||
+	if ownerAICandidate.Code != http.StatusOK || ownerAICandidate.Header().Get("Content-Type") != "image/jpeg" ||
 		ownerAICandidate.Header().Get("Cache-Control") != "private, no-store" ||
 		outsiderAICandidate.Code != http.StatusNotFound {
 		t.Fatalf("AI candidate access owner=%d outsider=%d", ownerAICandidate.Code, outsiderAICandidate.Code)
@@ -360,7 +354,7 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 		t.Fatalf("AI candidate choice = %d: %s", chooseAI.Code, chooseAI.Body)
 	}
 	state, stateErr = d.CoverStateForUser(context.Background(), "cover-owner", "cover-book")
-	if stateErr != nil || state.SelectedKind != "ai_svg" || state.SelectedRelPath != aiRelative ||
+	if stateErr != nil || state.SelectedKind != "ai_image" || state.SelectedRelPath != aiRelative ||
 		state.AICandidateRelPath != "" || !state.LookupPaused {
 		t.Fatalf("AI cover choice state=%#v err=%v", state, stateErr)
 	}

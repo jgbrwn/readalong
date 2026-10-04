@@ -444,8 +444,8 @@ func (d *DB) SetCoverRegenerationResults(ctx context.Context, task CoverTask,
 
 func (d *DB) SetGeneratedCover(ctx context.Context, task CoverTask, relPath string, nextCheckAt string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status='selected',selected_kind='ai_svg',
-		local_scan_needed=0,selected_relpath=?,selected_url=NULL,selected_provider='Readalong vector art',next_check_at=?,
+	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status='selected',selected_kind='ai_image',
+		local_scan_needed=0,selected_relpath=?,selected_url=NULL,selected_provider='OpenRouter image generation',next_check_at=?,
 		lookup_paused=0,lease_until=NULL,updated_at=? WHERE book_id=? AND selected_kind='' AND lease_until=?
 		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		relPath, nullableString(nextCheckAt), now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
@@ -543,8 +543,11 @@ func (d *DB) ChooseCoverCandidate(ctx context.Context, ownerID, bookID, action s
 				AND NOT EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running'))`
 	case "use_ai_candidate":
 		query = `UPDATE book_cover_state SET
-			selected_kind='ai_svg',selected_relpath=ai_candidate_relpath,selected_url=NULL,
-			selected_provider='Readalong vector art',selected_year=ai_candidate_year,
+			selected_kind=CASE WHEN lower(COALESCE(ai_candidate_relpath,'')) LIKE '%.svg' THEN 'ai_svg' ELSE 'ai_image' END,
+			selected_relpath=ai_candidate_relpath,selected_url=NULL,
+			selected_provider=CASE WHEN lower(COALESCE(ai_candidate_relpath,'')) LIKE '%.svg'
+				THEN 'Readalong vector art' ELSE 'OpenRouter image generation' END,
+			selected_year=ai_candidate_year,
 			candidate_kind='',candidate_relpath=NULL,candidate_url=NULL,candidate_provider=NULL,candidate_year=0,
 			ai_candidate_relpath=NULL,ai_candidate_year=0,
 			status='selected',lookup_paused=1,next_check_at=NULL,lease_until=NULL,updated_at=?

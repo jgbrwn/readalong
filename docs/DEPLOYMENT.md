@@ -28,12 +28,17 @@ with `Readalong/1.0`. If the owner wants a contact in the User-Agent, set
 is not the signed-in user's email. Cover lookup does not send audio, EPUB
 contents, account IDs, or source URLs.
 
-The admin cover-model picker discovers the attached managed LLM service
-through Reflection; it does not need a provider key in Readalong's `.env`.
-The model check sends a tiny inference request and may consume provider quota.
-Configure `OPEN_LIBRARY_CONTACT` only if you want the cover-catalog User-Agent
-to include an installation contact; Readalong never substitutes a user's
-exe.dev email.
+AI cover generation uses OpenRouter's dedicated Images API directly because
+the attached exe.dev LLM gateway does not expose the full image-model set.
+Set `OPENROUTER_API_KEY` in the private `.env`; Readalong captures it at
+startup, removes it from the process environment before media-tool subprocesses
+run, and never sends it to the browser or logs it. Image generation is paid
+per model/output and may require OpenRouter account credits. The picker offers
+GPT Image 2 by default, Seedream 4.5, and FLUX.2 Pro.
+
+Configure `OPEN_LIBRARY_CONTACT` only if you want the cover-catalog
+User-Agent to include an installation contact; Readalong never substitutes a
+user's exe.dev email.
 
 ## First admin
 

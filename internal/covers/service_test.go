@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,26 @@ import (
 	"github.com/jgbrwn/readalong/internal/db"
 	"github.com/jgbrwn/readalong/internal/pipeline"
 )
+
+type fakeCoverImageGenerator struct {
+	configured bool
+	image      coverai.GeneratedImage
+	err        error
+	calls      int
+	modelID    string
+	details    coverai.CoverDetails
+}
+
+func (f *fakeCoverImageGenerator) Configured() bool { return f.configured }
+
+func (f *fakeCoverImageGenerator) GenerateCoverImage(_ context.Context, modelID string,
+	details coverai.CoverDetails,
+) (coverai.GeneratedImage, error) {
+	f.calls++
+	f.modelID = modelID
+	f.details = details
+	return f.image, f.err
+}
 
 func TestLookupCacheDeduplicatesAcrossEquivalentBookMetadata(t *testing.T) {
 	var calls int
@@ -127,29 +148,6 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 		t.Fatalf("regeneration claim=%#v found=%v err=%v", task, found, err)
 	}
 
-	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/integrations":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"integrations": []any{map[string]any{
-					"name": "llm", "type": "llm", "help": "Models: http://" + r.Host + "/v1/models",
-				}},
-			})
-		case "/v1/models":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{
-				"id": "neuralwatt/test-design", "owned_by": "neuralwatt",
-				"metadata": map[string]any{"capabilities": map[string]any{"vision": false}},
-			}}})
-		case "/v1/chat/completions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": `{"motif":"four_sisters","colors":["#112233","#445566","#778899"]}`},
-				"finish_reason": "stop",
-			}}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer llmServer.Close()
 	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"docs": []any{map[string]any{
 			"key": "/works/OL123W", "title": "Example Book", "author_name": []string{"A. Writer"},
@@ -157,9 +155,12 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 		}}})
 	}))
 	defer catalogServer.Close()
+	var imageData bytes.Buffer
+	if err := jpeg.Encode(&imageData, image.NewRGBA(image.Rect(0, 0, 768, 1152)), &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
 	settings, err := json.Marshal(coverai.Settings{
-		Enabled: true, CatalogLookupEnabled: true, ModelID: "neuralwatt/test-design",
-		APIStyle: coverai.APIAuto, APIStyleVersion: coverai.CurrentSettingsVersion,
+		Enabled: true, CatalogLookupEnabled: true, ModelID: coverai.DefaultImageModelID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,10 +168,11 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 	if err := database.SetAppSetting(ctx, coverAISettingsKey, string(settings)); err != nil {
 		t.Fatal(err)
 	}
-	registry := coverai.NewRegistry()
-	registry.ReflectionURL = llmServer.URL + "/integrations"
-	registry.HTTP = llmServer.Client()
-	service := New(config.Config{DataDir: dataDir}, database, registry)
+	generator := &fakeCoverImageGenerator{
+		configured: true,
+		image:      coverai.GeneratedImage{Bytes: imageData.Bytes(), Extension: "jpg"},
+	}
+	service := New(config.Config{DataDir: dataDir}, database, generator)
 	service.catalog = &OpenLibrary{BaseURL: catalogServer.URL + "/search.json", HTTP: catalogServer.Client()}
 	service.process(ctx, task)
 
@@ -183,8 +185,10 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 	}
 	aiPath := filepath.Join(dataDir, state.AICandidateRelPath)
 	aiCover, err := os.ReadFile(aiPath)
-	if err != nil || !strings.HasPrefix(string(aiCover), "<svg ") ||
-		!strings.Contains(string(aiCover), "Example Book") {
+	if err != nil || !bytes.HasPrefix(aiCover, []byte{0xff, 0xd8, 0xff}) ||
+		!strings.HasSuffix(state.AICandidateRelPath, ".jpg") || generator.calls != 1 ||
+		generator.modelID != coverai.DefaultImageModelID || generator.details.Author != "A. Writer" ||
+		generator.details.Year != 1930 {
 		t.Fatalf("fresh AI cover missing or invalid: bytes=%d err=%v", len(aiCover), err)
 	}
 }
