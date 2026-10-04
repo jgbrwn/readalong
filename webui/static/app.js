@@ -12,7 +12,7 @@ let shelfBooksByID = new Map();
 let coverReviewTarget = null;
 
 async function apiResponse(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, { ...options, cache: 'no-store' });
   if (!response.ok) {
     const detail = (await response.text()).trim();
     throw new Error(detail || `Request failed (${response.status})`);

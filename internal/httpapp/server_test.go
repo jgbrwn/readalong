@@ -188,6 +188,15 @@ func TestOwnerCanQueueCoverRegenerationAndCannotQueueDuplicates(t *testing.T) {
 	}
 }
 
+func TestPrivateBookshelfAPIIsNeverBrowserCached(t *testing.T) {
+	cfg := config.Config{Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound}
+	_, handler := testServer(t, cfg)
+	response := request(handler, http.MethodGet, "/api/books", "cache-owner", "owner@example.org", "")
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("books API cache policy = %d %q", response.Code, response.Header().Get("Cache-Control"))
+	}
+}
+
 func TestAdminBookOperationEndpointsAreAdminOnlyAndQueueCompleteBooks(t *testing.T) {
 	cfg := config.Config{
 		Env: "production", RequireExe: true, DenyStatus: http.StatusNotFound,
@@ -312,14 +321,23 @@ func TestCoverArtworkAndChoiceAreOwnerScoped(t *testing.T) {
 		"cover-owner", "owner@example.org", "")
 	outsiderAICandidate := request(handler, http.MethodGet, "/api/books/cover-book/cover/ai-candidate",
 		"cover-outsider", "other@example.org", "")
-	if ownerAICandidate.Code != http.StatusOK || outsiderAICandidate.Code != http.StatusNotFound {
+	if ownerAICandidate.Code != http.StatusOK ||
+		ownerAICandidate.Header().Get("Cache-Control") != "private, no-store" ||
+		outsiderAICandidate.Code != http.StatusNotFound {
 		t.Fatalf("AI candidate access owner=%d outsider=%d", ownerAICandidate.Code, outsiderAICandidate.Code)
 	}
 	books, err := d.BooksForUser(context.Background(), "cover-owner")
 	if err != nil || len(books) != 1 || !books[0].CoverReviewNeeded ||
 		books[0].CoverCandidateYear != 1920 || books[0].CoverAICandidateYear != 1935 ||
-		books[0].CoverAICandidateURL != "/api/books/cover-book/cover/ai-candidate" {
+		!strings.HasPrefix(books[0].CoverAICandidateURL, "/api/books/cover-book/cover/ai-candidate?v=") {
 		t.Fatalf("book cover summary=%#v err=%v", books, err)
+	}
+	versionedAICandidate := request(handler, http.MethodGet, books[0].CoverAICandidateURL,
+		"cover-owner", "owner@example.org", "")
+	if versionedAICandidate.Code != http.StatusOK ||
+		versionedAICandidate.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("versioned AI candidate access = %d cache=%q", versionedAICandidate.Code,
+			versionedAICandidate.Header().Get("Cache-Control"))
 	}
 	chosen := request(handler, http.MethodPost, "/api/books/cover-book/cover-choice",
 		"cover-owner", "owner@example.org", `{"action":"use_candidate"}`)

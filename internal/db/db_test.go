@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -260,8 +261,8 @@ func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T
 		clone.GutenbergID != "123" || clone.AlignmentQuality == nil || *clone.AlignmentQuality != quality ||
 		clone.AudioRelPath != "books/recipient/clone-id/playback.mp3" || clone.JobStatus != "completed" ||
 		clone.CoverKind != "ai_svg" || clone.CoverYear != 1935 ||
-		clone.CoverURL != "/api/books/clone-id/cover/selected" ||
-		clone.CoverAICandidateURL != "/api/books/clone-id/cover/ai-candidate" ||
+		!strings.HasPrefix(clone.CoverURL, "/api/books/clone-id/cover/selected?v=") ||
+		!strings.HasPrefix(clone.CoverAICandidateURL, "/api/books/clone-id/cover/ai-candidate?v=") ||
 		clone.CoverAICandidateYear != 1940 {
 		t.Fatalf("unexpected cloned book: %#v", clone)
 	}
@@ -303,6 +304,15 @@ func TestAdminCloneCreatesIndependentReadyBookWithoutProgressOrJobs(t *testing.T
 	}
 	if err := d.QueueAdminBookOperation(ctx, secondClone); err != nil {
 		t.Fatalf("completed clone could not be copied again: %v", err)
+	}
+}
+
+func TestVersionedCoverURLsAreOpaqueAndChangeWithCandidatePath(t *testing.T) {
+	first := versionedCoverURL("book-id", "ai-candidate", "books/private/book-id/cover/old.svg")
+	second := versionedCoverURL("book-id", "ai-candidate", "books/private/book-id/cover/new.svg")
+	if first == second || !strings.HasPrefix(first, "/api/books/book-id/cover/ai-candidate?v=") ||
+		strings.Contains(first, "books/private") || len(strings.TrimPrefix(first, "/api/books/book-id/cover/ai-candidate?v=")) != 16 {
+		t.Fatalf("cover version URL is not opaque and path-specific: first=%q second=%q", first, second)
 	}
 }
 

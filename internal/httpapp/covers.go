@@ -74,7 +74,10 @@ func (s *Server) coverFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	// Cover variant URLs point at mutable per-book pointers. The list API adds
+	// an opaque path-derived version query so new candidates bypass any already
+	// cached old URL; no-store prevents this version from being reused later.
+	w.Header().Set("Cache-Control", "private, no-store")
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
 }
 

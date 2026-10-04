@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,7 +105,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 	}
 	book, err := d.BookForUser(ctx, "cover-owner", "regenerate-book")
 	if err != nil || !book.CoverRegenerationQueued || book.CoverKind != "ai_svg" ||
-		book.CoverURL != "/api/books/regenerate-book/cover/selected" {
+		!strings.HasPrefix(book.CoverURL, "/api/books/regenerate-book/cover/selected?v=") {
 		t.Fatalf("queued regeneration did not preserve the selected cover: book=%#v err=%v", book, err)
 	}
 	now := time.Now().UTC()
@@ -124,8 +125,8 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
 	if err != nil || !book.CoverReviewNeeded ||
 		book.CoverCandidateURL != "https://covers.openlibrary.org/b/id/99-M.jpg" ||
-		book.CoverAICandidateURL != "/api/books/regenerate-book/cover/ai-candidate" ||
-		book.CoverAICandidateYear != 1935 || book.CoverURL != "/api/books/regenerate-book/cover/selected" {
+		!strings.HasPrefix(book.CoverAICandidateURL, "/api/books/regenerate-book/cover/ai-candidate?v=") ||
+		book.CoverAICandidateYear != 1935 || !strings.HasPrefix(book.CoverURL, "/api/books/regenerate-book/cover/selected?v=") {
 		t.Fatalf("manual regeneration did not expose both choices: book=%#v err=%v", book, err)
 	}
 	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "regenerate-book", "use_ai_candidate"); err != nil {
@@ -133,7 +134,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 	}
 	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
 	if err != nil || book.CoverKind != "ai_svg" ||
-		book.CoverURL != "/api/books/regenerate-book/cover/selected" ||
+		!strings.HasPrefix(book.CoverURL, "/api/books/regenerate-book/cover/selected?v=") ||
 		book.CoverReviewNeeded || book.CoverAICandidateURL != "" {
 		t.Fatalf("new AI cover was not selected cleanly: book=%#v err=%v", book, err)
 	}

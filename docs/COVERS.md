@@ -104,6 +104,8 @@ Readalong validates that recipe and renders it with a local, fixed library of
 script-free vector motifs. Vision input and native image output are separate
 capabilities and neither is required. Arbitrary model-authored SVG/HTML, URLs,
 scripts, and file paths are never accepted.
+Local mutable cover previews use opaque versioned URLs and no-store responses
+so a regenerated candidate cannot be mistaken for a cached older image.
 
 ## Compare and choose
 

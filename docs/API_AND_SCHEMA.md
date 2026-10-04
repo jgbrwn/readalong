@@ -132,7 +132,10 @@ POST   /api/admin/cover-ai/check
 
 Mutating API requests require a same-origin `Origin` header. All book-specific
 routes enforce stable-ID ownership, including audio ranges and event streams.
-Filesystem paths and source URLs are never returned to clients.
+Filesystem paths and source URLs are never returned to clients. Private API
+responses use `private, no-store`; local mutable cover URLs include an opaque,
+path-derived version so replaced cover candidates cannot reuse an old browser
+cache entry.
 
 ### GET /api/books
 

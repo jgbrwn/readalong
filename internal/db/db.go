@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	_ "modernc.org/sqlite"
@@ -62,6 +64,9 @@ type Book struct {
 	EbookJSONRelPath        string   `json:"-"`
 	AlignmentRelPath        string   `json:"-"`
 	TranscriptRelPath       string   `json:"-"`
+	coverSelectedRelPath    string
+	coverCandidateRelPath   string
+	coverAICandidateRelPath string
 }
 
 type NewBook struct {
@@ -399,11 +404,9 @@ const bookSelectColumns = `b.id,b.title,b.author,b.source_kind,b.mode,b.status,b
 	COALESCE(b.alignment_relpath,''),b.alignment_quality,COALESCE(b.gutenberg_id,''),
 	COALESCE(b.ebook_source_url,''),COALESCE(cs.status,'pending'),COALESCE(cs.regeneration_requested,0),
 	COALESCE(cs.selected_kind,''),
-	CASE WHEN COALESCE(cs.selected_url,'')<>'' THEN cs.selected_url
-		WHEN COALESCE(cs.selected_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/selected' ELSE '' END,
-	CASE WHEN COALESCE(cs.candidate_url,'')<>'' THEN cs.candidate_url
-		WHEN COALESCE(cs.candidate_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/candidate' ELSE '' END,
-	CASE WHEN COALESCE(cs.ai_candidate_relpath,'')<>'' THEN '/api/books/'||b.id||'/cover/ai-candidate' ELSE '' END,
+	COALESCE(cs.selected_url,''),COALESCE(cs.selected_relpath,''),
+	COALESCE(cs.candidate_url,''),COALESCE(cs.candidate_relpath,''),
+	COALESCE(cs.ai_candidate_relpath,''),
 	COALESCE(cs.ai_candidate_year,0),
 	CASE WHEN COALESCE(cs.candidate_url,'')<>'' OR COALESCE(cs.candidate_relpath,'')<>'' OR
 		COALESCE(cs.ai_candidate_relpath,'')<>'' THEN 1 ELSE 0 END,
@@ -427,13 +430,29 @@ func scanBook(row rowScanner) (Book, error) {
 		&b.EpubRelPath, &b.EbookJSONRelPath, &b.TranscriptRelPath, &b.AlignmentRelPath,
 		&alignmentQuality, &b.GutenbergID, &b.EbookSourceURL, &b.CoverStatus,
 		&b.CoverRegenerationQueued, &b.CoverKind,
-		&b.CoverURL, &b.CoverCandidateURL, &b.CoverAICandidateURL, &b.CoverAICandidateYear,
+		&b.CoverURL, &b.coverSelectedRelPath, &b.CoverCandidateURL, &b.coverCandidateRelPath,
+		&b.coverAICandidateRelPath, &b.CoverAICandidateYear,
 		&b.CoverReviewNeeded, &b.CoverYear,
 		&b.CoverProvider, &b.CoverCandidateProvider, &b.CoverCandidateYear)
 	if alignmentQuality.Valid {
 		b.AlignmentQuality = &alignmentQuality.Float64
 	}
+	if b.CoverURL == "" && b.coverSelectedRelPath != "" {
+		b.CoverURL = versionedCoverURL(b.ID, "selected", b.coverSelectedRelPath)
+	}
+	if b.CoverCandidateURL == "" && b.coverCandidateRelPath != "" {
+		b.CoverCandidateURL = versionedCoverURL(b.ID, "candidate", b.coverCandidateRelPath)
+	}
+	if b.coverAICandidateRelPath != "" {
+		b.CoverAICandidateURL = versionedCoverURL(b.ID, "ai-candidate", b.coverAICandidateRelPath)
+	}
 	return b, err
+}
+
+func versionedCoverURL(bookID, variant, relativePath string) string {
+	digest := sha256.Sum256([]byte(relativePath))
+	version := hex.EncodeToString(digest[:8])
+	return fmt.Sprintf("/api/books/%s/cover/%s?v=%s", bookID, variant, version)
 }
 
 func (d *DB) BookForUser(ctx context.Context, uid, bid string) (Book, error) {

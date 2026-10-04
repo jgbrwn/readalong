@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,8 +150,9 @@ func TestCloneCopiesArtifactsIndependentlyAndKeepsSource(t *testing.T) {
 			t.Fatalf("clone artifact %q missing: %v", path, err)
 		}
 	}
-	if cloned.CoverKind != "ai_svg" || cloned.CoverURL != "/api/books/book-clone/cover/selected" ||
-		cloned.CoverAICandidateURL != "/api/books/book-clone/cover/ai-candidate" ||
+	if cloned.CoverKind != "ai_svg" ||
+		!strings.HasPrefix(cloned.CoverURL, "/api/books/book-clone/cover/selected?v=") ||
+		!strings.HasPrefix(cloned.CoverAICandidateURL, "/api/books/book-clone/cover/ai-candidate?v=") ||
 		!cloned.CoverReviewNeeded {
 		t.Fatalf("cover state was not cloned: %#v", cloned)
 	}
@@ -189,8 +191,9 @@ func TestTransferMovesOwnerPathsAndRemovesFormerOwnerDirectory(t *testing.T) {
 	if transferred.AudioRelPath != filepath.Join(targetBookDir, "playback.mp3") {
 		t.Fatalf("transferred path was not rewritten: %q", transferred.AudioRelPath)
 	}
-	if transferred.CoverKind != "ai_svg" || transferred.CoverURL != "/api/books/"+operation.BookID+"/cover/selected" ||
-		transferred.CoverAICandidateURL != "/api/books/"+operation.BookID+"/cover/ai-candidate" ||
+	if transferred.CoverKind != "ai_svg" ||
+		!strings.HasPrefix(transferred.CoverURL, "/api/books/"+operation.BookID+"/cover/selected?v=") ||
+		!strings.HasPrefix(transferred.CoverAICandidateURL, "/api/books/"+operation.BookID+"/cover/ai-candidate?v=") ||
 		!transferred.CoverReviewNeeded {
 		t.Fatalf("cover state was not transferred: %#v", transferred)
 	}
