@@ -150,8 +150,10 @@
   the owner manually regenerates again.
 - Clone/transfer remaps and copies pending AI candidate assets as well as the
   selected and catalog cover files.
-- Generated cover recipes accept only a fixed theme and validated colors;
-  Readalong renders escaped SVG locally and rejects model-authored markup.
+- Generated cover recipes accept only a fixed literary motif and validated
+  colors; Readalong renders escaped SVG locally and rejects model-authored markup.
+- The Little Women fixture requests four distinct sister figures and excludes
+  generic botanical ornamentation.
 - Reflection discovery includes text-output candidates across OpenAI/ChatGPT,
   Neuralwatt, and OpenRouter; normalizes modalities and pricing, deduplicates
   OpenAI aliases, and serves stale cache data on discovery failure.

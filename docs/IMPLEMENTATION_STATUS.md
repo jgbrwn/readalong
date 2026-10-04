@@ -63,8 +63,9 @@ Implemented first passes:
 - optional AI-designed SVG fallback. Reflection discovers text-output models
   across OpenAI/ChatGPT, Neuralwatt, and OpenRouter, caches a sanitized
   capability/pricing list, and provides searchable selection, Auto API
-  detection/fallback, and a live health check. The selected LLM returns a
-  bounded design recipe and Readalong renders the SVG locally;
+  detection/fallback, and a live health check. The selected LLM uses work
+  context to choose a whitelisted story motif and palette; Readalong renders
+  the SVG locally (including four distinct sisters for *Little Women*);
 - per-book cover regeneration. The owner can rerun catalog discovery and
   generate a fresh AI candidate while keeping the selected cover, then choose
   the current, catalog, or generated cover;

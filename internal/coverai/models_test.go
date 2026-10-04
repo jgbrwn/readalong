@@ -3,6 +3,7 @@ package coverai
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"math"
 	"net/http"
@@ -155,7 +156,7 @@ func TestCheckModelUsesSelectedAPIStyleAndReportsQuotaIssues(t *testing.T) {
 				t.Errorf("Responses health check must use the typed message-list input: %#v", body["input"])
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
-			recipe := `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`
+			recipe := `{"motif":"open_book","colors":["#112233","#445566","#778899"]}`
 			delta, _ := json.Marshal(recipe)
 			_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":" + string(delta) + "}\n\n" +
 				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"))
@@ -168,7 +169,7 @@ func TestCheckModelUsesSelectedAPIStyleAndReportsQuotaIssues(t *testing.T) {
 				t.Errorf("bad Chat Completions health check: %#v, err=%v", body, err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": []any{map[string]any{"type": "text", "text": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`}}},
+				"message":       map[string]any{"content": []any{map[string]any{"type": "text", "text": `{"motif":"open_book","colors":["#112233","#445566","#778899"]}`}}},
 				"finish_reason": "stop",
 			}}})
 		case "/v1/chat/completions/quota":
@@ -213,7 +214,7 @@ func TestAutoCheckFallsBackOnlyWhenPreferredEndpointRejectsRequest(t *testing.T)
 		case "/v1/chat/completions":
 			calls = append(calls, "chat")
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`},
+				"message":       map[string]any{"content": `{"motif":"open_book","colors":["#112233","#445566","#778899"]}`},
 				"finish_reason": "stop",
 			}}})
 		default:
@@ -252,7 +253,7 @@ func TestAutoCheckTriesAlternateAfterEmptySuccessfulResponse(t *testing.T) {
 		case "/v1/chat/completions":
 			calls = append(calls, "chat")
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": `{"theme":"geometric","colors":["#112233","#445566","#778899"]}`},
+				"message":       map[string]any{"content": `{"motif":"open_book","colors":["#112233","#445566","#778899"]}`},
 				"finish_reason": "stop",
 			}}})
 		default:
@@ -300,12 +301,12 @@ func TestModelCheckClassifiesSubscriptionAndQuotaFailures(t *testing.T) {
 
 func TestGeneratedCoverUsesSafeLocalSVGAndExactTypography(t *testing.T) {
 	cover := renderCoverSVG(`<The Book>`, `A & B`, 1935, coverRecipe{
-		Theme: "botanical", Colors: []string{"#112233", "#445566", "#778899"},
+		Motif: "four_sisters", Colors: []string{"#112233", "#445566", "#778899"},
 	})
 	text := string(cover)
 	for _, want := range []string{
 		`&lt;The Book&gt;`, `A &amp; B`, "First published 1935",
-		`<svg xmlns="http://www.w3.org/2000/svg"`, `<path d="M410 490`,
+		`<svg xmlns="http://www.w3.org/2000/svg"`, `READALONG · FOUR SISTERS`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("generated SVG missing %q: %s", want, text)
@@ -316,11 +317,31 @@ func TestGeneratedCoverUsesSafeLocalSVGAndExactTypography(t *testing.T) {
 			t.Fatalf("generated SVG contains unsafe content %q", forbidden)
 		}
 	}
+	if got := strings.Count(text, `class="sister"`); got != 4 {
+		t.Fatalf("Little Women motif has %d sisters, want four", got)
+	}
+}
+
+func TestEveryWhitelistedMotifRendersWellFormedSafeSVG(t *testing.T) {
+	for motif := range allowedCoverMotifs {
+		svg := renderCoverSVG("A Literary Work", "An Author", 0, coverRecipe{
+			Motif: motif, Colors: []string{"#263F39", "#B77D55", "#E3CFA6"},
+		})
+		var document struct {
+			XMLName xml.Name `xml:"svg"`
+		}
+		if err := xml.Unmarshal(svg, &document); err != nil || document.XMLName.Local != "svg" {
+			t.Errorf("motif %q rendered invalid SVG: %v", motif, err)
+		}
+		if strings.Contains(string(svg), "<script") || strings.Contains(string(svg), "https://") {
+			t.Errorf("motif %q rendered unsafe SVG content", motif)
+		}
+	}
 }
 
 func TestParseRecipeFallsBackFromUntrustedModelMarkup(t *testing.T) {
-	recipe := parseRecipe(`{"theme":"<svg onload=alert(1)>","colors":["url(x)","#112233","#445566"]}`, "Example")
-	if !allowedCoverThemes[recipe.Theme] || len(recipe.Colors) != 3 {
+	recipe := parseRecipe(`{"motif":"<svg onload=alert(1)>","colors":["url(x)","#112233","#445566"]}`, "Example")
+	if !allowedCoverMotifs[recipe.Motif] || len(recipe.Colors) != 3 {
 		t.Fatalf("unsafe model recipe was not replaced: %#v", recipe)
 	}
 	for _, color := range recipe.Colors {
@@ -332,6 +353,7 @@ func TestParseRecipeFallsBackFromUntrustedModelMarkup(t *testing.T) {
 
 func TestGenerateVectorCoverUsesTypedRequestsAndSharedResponseParsing(t *testing.T) {
 	var endpoints []string
+	var sawLittleWomenPrompt bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/integrations":
@@ -363,7 +385,7 @@ func TestGenerateVectorCoverUsesTypedRequestsAndSharedResponseParsing(t *testing
 				t.Errorf("Responses cover request omitted the short description: %#v err=%v", request, err)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"theme\\\":\\\"celestial\\\",\\\"colors\\\":[\\\"#112233\\\",\\\"#445566\\\",\\\"#778899\\\"]}\"}\n\n" +
+			_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"motif\\\":\\\"moon\\\",\\\"colors\\\":[\\\"#112233\\\",\\\"#445566\\\",\\\"#778899\\\"]}\"}\n\n" +
 				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"))
 		case "/v1/chat/completions":
 			endpoints = append(endpoints, "chat")
@@ -372,11 +394,27 @@ func TestGenerateVectorCoverUsesTypedRequestsAndSharedResponseParsing(t *testing
 				t.Errorf("invalid Chat Completions cover request: %v", err)
 			}
 			messages, _ := request["messages"].([]any)
-			if len(messages) == 0 || !strings.Contains(stringValue(mapValue(messages[0])["content"]), "A short story of courage") {
+			prompt := ""
+			if len(messages) > 0 {
+				prompt = stringValue(mapValue(messages[0])["content"])
+			}
+			if !strings.Contains(prompt, "A short story of courage") && !strings.Contains(prompt, "Little Women") {
+				t.Errorf("Chat Completions cover request omitted expected subject context: %#v", request)
+			}
+			if strings.Contains(prompt, "Little Women") {
+				sawLittleWomenPrompt = strings.Contains(prompt, `The story title is "Little Women"`) &&
+					strings.Contains(prompt, "four distinct young women/sisters") &&
+					strings.Contains(prompt, "not flowers or plants")
+			}
+			if prompt == "" {
 				t.Errorf("Chat Completions cover request omitted the short description: %#v", request)
 			}
+			recipe := `{"motif":"ship","colors":["#123456","#456789","#789ABC"]}`
+			if strings.Contains(prompt, "Little Women") {
+				recipe = `{"motif":"four_sisters","colors":["#123456","#456789","#789ABC"]}`
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": `{"theme":"coastal","colors":["#123456","#456789","#789ABC"]}`},
+				"message":       map[string]any{"content": recipe},
 				"finish_reason": "stop",
 			}}})
 		default:
@@ -396,7 +434,16 @@ func TestGenerateVectorCoverUsesTypedRequestsAndSharedResponseParsing(t *testing
 			t.Fatalf("cover renderer lost exact metadata for %s", style)
 		}
 	}
-	if strings.Join(endpoints, ",") != "responses,chat" {
+	littleWomen, err := registry.GenerateVectorCover(context.Background(), "sample/vision", APIChat,
+		"Little Women (dramatic reading)", "Louisa May Alcott", "", 1868)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawLittleWomenPrompt || !strings.Contains(string(littleWomen), "FOUR SISTERS") ||
+		strings.Count(string(littleWomen), `class="sister"`) != 4 {
+		t.Fatalf("Little Women title-specific illustration was not generated")
+	}
+	if strings.Join(endpoints, ",") != "responses,chat,chat" {
 		t.Fatalf("cover requests used unexpected endpoints: %v", endpoints)
 	}
 }

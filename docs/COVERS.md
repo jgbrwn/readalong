@@ -96,12 +96,14 @@ advertises that option. Failures distinguish provider limits/credits,
 unsupported endpoints, truncation, refusals, and no-text responses. Checks
 remain explicit and may consume quota.
 
-The selected model returns a strict theme/color recipe based on the title,
-trusted author, optional short EPUB description metadata, and verified
-publication year; the server validates it and renders an SVG from fixed,
-script-free templates. Vision input and native image output are separate
-capabilities and neither is required for this text-to-SVG workflow. Arbitrary
-model-authored SVG/HTML, URLs, scripts, and file paths are never accepted.
+The selected model is prompted to identify the literary work using its title,
+author, known story context, verified publication year, and optional short EPUB
+description metadata. It returns a strict subject-motif/color recipe; for
+example, *Little Women* calls for four sister figures, not a generic flower.
+Readalong validates that recipe and renders it with a local, fixed library of
+script-free vector motifs. Vision input and native image output are separate
+capabilities and neither is required. Arbitrary model-authored SVG/HTML, URLs,
+scripts, and file paths are never accepted.
 
 ## Compare and choose
 

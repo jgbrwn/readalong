@@ -142,7 +142,7 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 			}}})
 		case "/v1/chat/completions":
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message":       map[string]any{"content": `{"theme":"botanical","colors":["#112233","#445566","#778899"]}`},
+				"message":       map[string]any{"content": `{"motif":"four_sisters","colors":["#112233","#445566","#778899"]}`},
 				"finish_reason": "stop",
 			}}})
 		default:

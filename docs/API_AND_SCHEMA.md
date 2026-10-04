@@ -173,9 +173,13 @@ failures. Responses streaming and Chat Completions text formats are both
 parsed. `GET` serves the six-hour cached inventory;
 `POST /api/admin/cover-ai/refresh` refreshes it. `PUT` saves the global catalog
 lookup switch, description-sharing preference, model ID, API style, and
-optional generation switch. The health check is explicit and rate-limited per
-model; model listing itself never runs inference. Checks and generated designs
-can consume provider quota.
+optional generation switch. Generation asks the selected model to use its
+knowledge of the work and return one whitelisted story motif plus a palette;
+Readalong renders that motif from safe local SVG templates. For example,
+*Little Women* uses four sister figures rather than an unrelated decorative
+flower. The health check is explicit and rate-limited per model; model listing
+itself never runs inference. Checks and generated designs can consume provider
+quota.
 
 ### Admin book operations
 

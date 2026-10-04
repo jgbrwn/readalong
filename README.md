@@ -117,8 +117,10 @@ downloaded into the private library only after the user confirms an import.
 When cover lookup is enabled, Readalong sends only title/author metadata to
 Open Library; audio and ebook text are not sent. Catalog cover images load
 directly from Open Library when visible. Optional generated cover design sends
-title/author and a short EPUB description metadata field (if present) to the
-managed LLM integration, never chapters or audio.
+title/author, a verified publication year, and (if enabled) short EPUB
+description metadata to the managed LLM integration. It requests a
+story-specific motif and palette, then renders the SVG locally; chapters and
+audio are never sent.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and

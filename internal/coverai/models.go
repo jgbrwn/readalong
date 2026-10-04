@@ -205,7 +205,7 @@ func (r *Registry) CheckModel(ctx context.Context, modelID string, style APIStyl
 	styles := apiStyleAttempts(model, style)
 	for index, attemptStyle := range styles {
 		responseBody, status, err := r.requestText(ctx, modelsURL, model, attemptStyle,
-			`Return only this valid design JSON: {"theme":"geometric","colors":["#112233","#445566","#778899"]}.`, maxCheckOutputTokens)
+			`Return only this valid design JSON: {"motif":"open_book","colors":["#112233","#445566","#778899"]}.`, maxCheckOutputTokens)
 		if err != nil {
 			return CheckResult{
 				APIStyle: attemptStyle, LatencyMS: time.Since(started).Milliseconds(),
