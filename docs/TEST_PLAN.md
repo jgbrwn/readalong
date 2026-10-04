@@ -143,6 +143,9 @@
   “keep current” lookup pause are enforced.
 - Cover image endpoints and cover choices are owner-scoped. Cover tasks never
   alter book readiness or transcription jobs.
+- Shelf thumbnails and cover-review images contain the full source artwork
+  without distortion, including title/author text near image edges; the
+  existing cover frame dimensions and card layout stay unchanged.
 - A ready owner can manually queue one cover regeneration at a time; current
   selection remains visible while catalog and fresh AI candidates are prepared.
 - Regeneration can offer both catalog and newly generated raster image options; choosing

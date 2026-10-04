@@ -116,7 +116,10 @@ button { cursor: pointer; }
 .cover-author { margin-top: 12px; font-size: .78rem; opacity: .8; }
 .book-cover-frame { position: relative; overflow: hidden; aspect-ratio: .76; border-radius: 8px 16px 16px 8px; background: #e5e2d8; box-shadow: inset 5px 0 #00000015, 0 12px 25px #1b241a13; }
 .book-cover-frame .book-cover { width: 100%; height: 100%; aspect-ratio: auto; border-radius: inherit; }
-.book-cover-image { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.book-cover-image {
+  display: block; width: 100%; height: 100%; border-radius: inherit;
+  object-fit: contain; object-position: center;
+}
 .cover-review-hint { position: absolute; top: 9px; left: 9px; z-index: 2; padding: 7px 10px; border: 1px solid #fff9; border-radius: 999px; color: #fff; background: #203b32ed; box-shadow: 0 2px 8px #0003; font-size: .68rem; font-weight: 700; animation: cover-hint-pulse 2.4s ease-in-out infinite; }
 @keyframes cover-hint-pulse { 50% { box-shadow: 0 0 0 6px #fff3, 0 2px 8px #0003; } }
 @media (prefers-reduced-motion: reduce) { .cover-review-hint { animation: none; } }
@@ -178,6 +181,7 @@ button { cursor: pointer; }
 .cover-compare { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .cover-compare figure { min-width: 0; margin: 0; }
 .cover-compare img, .cover-compare .book-cover { display: block; width: min(100%, 240px); aspect-ratio: .76; height: auto; margin: 0 auto; object-fit: cover; border-radius: 8px 16px 16px 8px; }
+.cover-compare img { object-fit: contain; object-position: center; background: #e5e2d8; }
 .cover-compare figcaption { margin-top: 8px; color: var(--muted); font-size: .75rem; text-align: center; }
 .cover-review-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; }
 .retranscribe-book-title { margin: -4px 0 0; color: var(--ink); font-weight: 650; }
