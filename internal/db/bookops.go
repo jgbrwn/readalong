@@ -112,18 +112,19 @@ func (d *DB) CloneReadyBookForAdmin(ctx context.Context, operation AdminBookOper
 		}
 	}
 	var cover BookCoverState
-	var lookupPaused int
+	var lookupPaused, aiGenerationBlocked int
 	if err := tx.QueryRowContext(ctx, `SELECT status,selected_kind,COALESCE(selected_relpath,''),
 		COALESCE(selected_url,''),COALESCE(selected_provider,''),selected_year,candidate_kind,
 		COALESCE(candidate_relpath,''),COALESCE(candidate_url,''),COALESCE(candidate_provider,''),
 		candidate_year,COALESCE(ai_candidate_relpath,''),ai_candidate_year,
 		COALESCE(last_checked_at,''),COALESCE(next_check_at,''),no_match_count,
-		failure_count,lookup_paused FROM book_cover_state WHERE book_id=?`, operation.BookID).
+		failure_count,lookup_paused,ai_generation_blocked FROM book_cover_state WHERE book_id=?`, operation.BookID).
 		Scan(&cover.Status, &cover.SelectedKind, &cover.SelectedRelPath, &cover.SelectedURL,
 			&cover.SelectedProvider, &cover.SelectedYear, &cover.CandidateKind, &cover.CandidateRelPath,
 			&cover.CandidateURL, &cover.CandidateProvider, &cover.CandidateYear,
 			&cover.AICandidateRelPath, &cover.AICandidateYear,
-			&cover.LastCheckedAt, &cover.NextCheckAt, &cover.NoMatchCount, &cover.FailureCount, &lookupPaused); err != nil {
+			&cover.LastCheckedAt, &cover.NextCheckAt, &cover.NoMatchCount, &cover.FailureCount,
+			&lookupPaused, &aiGenerationBlocked); err != nil {
 		if err != sql.ErrNoRows {
 			return err
 		}
@@ -136,14 +137,15 @@ func (d *DB) CloneReadyBookForAdmin(ctx context.Context, operation AdminBookOper
 			(book_id,status,selected_kind,selected_relpath,selected_url,selected_provider,selected_year,
 			 candidate_kind,candidate_relpath,candidate_url,candidate_provider,candidate_year,last_checked_at,
 			 ai_candidate_relpath,ai_candidate_year,next_check_at,no_match_count,failure_count,
-			 lookup_paused,regeneration_requested,lease_until,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,0,NULL,?)`,
+			 ai_generation_blocked,lookup_paused,regeneration_requested,lease_until,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?)`,
 			operation.TargetBookID, status, cover.SelectedKind, nullableString(paths.CoverSelected),
 			nullableString(cover.SelectedURL), nullableString(cover.SelectedProvider), cover.SelectedYear,
 			cover.CandidateKind, nullableString(paths.CoverCandidate), nullableString(cover.CandidateURL),
 			nullableString(cover.CandidateProvider), cover.CandidateYear, nullableString(cover.LastCheckedAt),
 			nullableString(paths.CoverAICandidate), cover.AICandidateYear,
-			nullableString(cover.NextCheckAt), cover.NoMatchCount, cover.FailureCount, lookupPaused, now); err != nil {
+			nullableString(cover.NextCheckAt), cover.NoMatchCount, cover.FailureCount,
+			aiGenerationBlocked, lookupPaused, now); err != nil {
 			return err
 		}
 	}

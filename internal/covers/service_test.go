@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -190,6 +191,100 @@ func TestManualRegenerationCreatesCatalogAndFreshAICoverCandidates(t *testing.T)
 		generator.modelID != coverai.DefaultImageModelID || generator.details.Author != "A. Writer" ||
 		generator.details.Year != 1930 {
 		t.Fatalf("fresh AI cover missing or invalid: bytes=%d err=%v", len(aiCover), err)
+	}
+}
+
+func TestFailedAutomaticImageAttemptWaitsForManualRegeneration(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	database, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.UpsertUser(ctx, "cover-owner", "owner@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateBookAndJob(ctx, db.NewBook{
+		ID: "blocked-cover", JobID: "blocked-cover-job", OwnerUserID: "cover-owner",
+		Title: "Blocked Cover", Author: "A Writer", SourceKind: "upload",
+		AudioRelPath: "books/cover-owner/blocked-cover/source/upload.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := database.ExecContext(ctx, `UPDATE books SET status='ready',duration_ms=60000,
+		transcript_relpath='books/cover-owner/blocked-cover/transcript.v1.json.gz' WHERE id='blocked-cover'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE jobs SET status='completed',stage='ready',progress=1
+		WHERE id='blocked-cover-job'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetAppSetting(ctx, coverAISettingsKey,
+		`{"enabled":true,"catalog_lookup_enabled":true,"model_id":"openai/gpt-image-2"}`); err != nil {
+		t.Fatal(err)
+	}
+	var catalogCalls int
+	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		catalogCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"docs": []any{}})
+	}))
+	defer catalogServer.Close()
+	generator := &fakeCoverImageGenerator{
+		configured: true,
+		err:        errors.New("ambiguous provider failure"),
+	}
+	service := New(config.Config{DataDir: dataDir}, database, generator)
+	service.catalog = &OpenLibrary{BaseURL: catalogServer.URL + "/search.json", HTTP: catalogServer.Client()}
+
+	task, found, err := database.ClaimNextCoverTask(ctx, now,
+		time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || task.BookID != "blocked-cover" {
+		t.Fatalf("initial cover task=%#v found=%v err=%v", task, found, err)
+	}
+	service.process(ctx, task)
+	state, err := database.CoverStateForUser(ctx, "cover-owner", "blocked-cover")
+	if err != nil || !state.AIGenerationBlocked || generator.calls != 1 || catalogCalls != 1 {
+		t.Fatalf("failed automatic attempt state=%#v generator_calls=%d catalog_calls=%d err=%v",
+			state, generator.calls, catalogCalls, err)
+	}
+
+	retryAt := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if _, err := database.ExecContext(ctx, `UPDATE book_cover_state SET next_check_at=? WHERE book_id='blocked-cover'`,
+		retryAt); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err = database.ClaimNextCoverTask(ctx, time.Now().UTC().Format(time.RFC3339),
+		time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !task.AIGenerationBlocked {
+		t.Fatalf("scheduled catalog check did not retain the image block: task=%#v found=%v err=%v", task, found, err)
+	}
+	service.process(ctx, task)
+	if generator.calls != 1 || catalogCalls != 1 {
+		t.Fatalf("automatic catalog check repeated image/search request: generator_calls=%d catalog_calls=%d",
+			generator.calls, catalogCalls)
+	}
+
+	if err := database.QueueCoverRegeneration(ctx, "cover-owner", "blocked-cover"); err != nil {
+		t.Fatal(err)
+	}
+	generator.err = nil
+	var imageBytes bytes.Buffer
+	if err := jpeg.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 64, 96)), &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	generator.image = coverai.GeneratedImage{Bytes: imageBytes.Bytes(), Extension: "jpg"}
+	task, found, err = database.ClaimNextCoverTask(ctx, time.Now().UTC().Format(time.RFC3339),
+		time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !task.RegenerationRequested {
+		t.Fatalf("manual regeneration did not authorize a new attempt: task=%#v found=%v err=%v", task, found, err)
+	}
+	service.process(ctx, task)
+	state, err = database.CoverStateForUser(ctx, "cover-owner", "blocked-cover")
+	if err != nil || state.AIGenerationBlocked || state.AICandidateRelPath == "" || generator.calls != 2 {
+		t.Fatalf("manual attempt did not clear the block: state=%#v generator_calls=%d err=%v",
+			state, generator.calls, err)
 	}
 }
 

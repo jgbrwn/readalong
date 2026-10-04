@@ -77,6 +77,10 @@ func TestPairedCatalogSearchAndOwnerScopedImport(t *testing.T) {
 	if book.EbookSourceURL != "https://www.gutenberg.org/ebooks/45" {
 		t.Fatalf("canonical ebook source = %q", book.EbookSourceURL)
 	}
+	coverState, err := d.CoverStateForUser(context.Background(), "catalog-user", book.ID)
+	if err != nil || coverState.Status != "pending" || coverState.NextCheckAt == "" {
+		t.Fatalf("paired import did not enqueue automatic cover work: state=%#v err=%v", coverState, err)
+	}
 	outsider := request(handler, http.MethodGet, "/api/books", "other-user", "other@example.org", "")
 	if outsider.Code != http.StatusOK || strings.Contains(outsider.Body.String(), book.ID) {
 		t.Fatalf("catalog book crossed owner boundary: %d %s", outsider.Code, outsider.Body)
@@ -787,6 +791,10 @@ func TestMultipartYouTubeImportIsProvisionedAndOwnerScoped(t *testing.T) {
 	if book.ID == "" || book.Title != "A private book" || book.SourceKind != "youtube" || book.Status != "queued" {
 		t.Fatalf("unexpected import response: %#v", book)
 	}
+	coverState, err := d.CoverStateForUser(context.Background(), "importer", book.ID)
+	if err != nil || coverState.Status != "pending" || coverState.NextCheckAt == "" {
+		t.Fatalf("URL import did not enqueue automatic cover work: state=%#v err=%v", coverState, err)
+	}
 	if strings.Contains(res.Body.String(), "audio_relpath") || strings.Contains(res.Body.String(), "source_url") {
 		t.Fatalf("API exposed private storage/source details: %s", res.Body)
 	}
@@ -843,6 +851,10 @@ func TestMultipartAudioEPUBImportCreatesAlignedBook(t *testing.T) {
 	}
 	if book.Mode != "aligned" || book.Title != "Test Book" || book.Author != "Test Author" {
 		t.Fatalf("unexpected paired upload: %#v", book)
+	}
+	coverState, err := d.CoverStateForUser(context.Background(), "ebook-owner", book.ID)
+	if err != nil || coverState.Status != "pending" || coverState.NextCheckAt == "" {
+		t.Fatalf("audio+EPUB upload did not enqueue automatic cover work: state=%#v err=%v", coverState, err)
 	}
 	if strings.Contains(res.Body.String(), "epub_relpath") || strings.Contains(res.Body.String(), "audio_relpath") {
 		t.Fatalf("response exposed private storage paths: %s", res.Body)

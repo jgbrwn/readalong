@@ -30,11 +30,21 @@ contents, account IDs, or source URLs.
 
 AI cover generation uses OpenRouter's dedicated Images API directly because
 the attached exe.dev LLM gateway does not expose the full image-model set.
-Set `OPENROUTER_API_KEY` in the private `.env`; Readalong captures it at
-startup, removes it from the process environment before media-tool subprocesses
-run, and never sends it to the browser or logs it. Image generation is paid
-per model/output and may require OpenRouter account credits. The picker offers
-GPT Image 2 by default, Seedream 4.5, and FLUX.2 Pro.
+For AI images, set `OPENROUTER_API_KEY=...` in the checkout-root `.env` and
+keep that file mode `600`. If `.env` already exists from an older checkout,
+add the variable manually; bootstrap only creates the file when it is absent.
+`config.Load` reads `.env` from the service working directory. The regular and
+Litestream systemd units unset the key before starting their process; Readalong
+captures it from `.env` at startup, removes it from its own environment before
+media-tool subprocesses run, and never sends or logs the value. Restart the
+active service after changing `.env`.
+
+The key is optional and **does not enable AI image generation**. It is off by
+default; an administrator must open **Admin → Cover artwork**, enable image
+generation, choose a model, and save. The picker offers GPT Image 2 by default,
+Seedream 4.5, and FLUX.2 Pro. Image requests are paid and require OpenRouter
+account credits. `scripts/doctor.sh` only reports whether a key is present; it
+does not make a billable request or inspect the account balance.
 
 Configure `OPEN_LIBRARY_CONTACT` only if you want the cover-catalog
 User-Agent to include an installation contact; Readalong never substitutes a
@@ -90,7 +100,10 @@ Verify it against the Litestream version you install before enabling it.
 
 Once Litestream is installed, `R2_ENABLED=true`, and the R2 S3 credentials are
 configured in `.env`, run `make install-litestream-service` to replace the
-regular app unit with the Litestream wrapper. Alternatively, run:
+regular app unit with the Litestream wrapper. The wrapper also removes
+`OPENROUTER_API_KEY` from its environment; the child Readalong process reads
+the private `.env` itself. To switch back, run `make install-service`, which
+stops/disables the wrapper before enabling the regular unit. Alternatively, run:
 
 ```bash
 litestream replicate -config ./deploy/litestream.yml \
@@ -115,9 +128,11 @@ Run after completed imports and/or from a systemd timer. The hot app path remain
 ## systemd
 
 Clone the repository into `~/readalong`, configure `.env`, and run
-`make install-service` to build, install, enable, and start the per-user systemd
-unit. The installer renders paths for the current user and checkout. The app
-restarts automatically and remains bound to loopback.
+`make install-service` to build, install, enable, and start the system-wide
+`readalong.service` unit. The unit is installed under `/etc/systemd/system` but
+runs as the checkout owner, using that checkout as its working directory. The
+installer renders paths for the current user and checkout, stops the optional
+Litestream wrapper when switching back, and keeps the app bound to loopback.
 
 ## Restore drill
 

@@ -126,6 +126,10 @@
 
 - Migration queues existing bookshelf books; new books enter the same persisted
   reconciliation flow.
+- Manual upload and paired import both enqueue cover state atomically with the
+  book/job; the worker waits for stable media and aligned EPUB metadata, then
+  may work during transcription/rate-limit waits, but not during acquisition
+  or a retranscription.
 - EPUB2 and EPUB3 declared covers extract and normalize; undeclared decorative
   images, SVG payloads, oversized images, and unsafe archive paths are rejected.
 - Disabling external catalog searches does not suppress local EPUB/audio
@@ -169,6 +173,10 @@
   current-cover preservation, and clone/transfer work for both asset formats.
 - Provider 401/402/429, malformed output, and timeouts do not trigger fallback
   models or automatic retries that could duplicate image charges.
+- Image attempts are durably reserved before provider dispatch. A failed or
+  interrupted attempt cannot be automatically replayed after lease expiry or
+  restart; a manual Regenerate request explicitly authorizes another attempt,
+  while ordinary catalog polling can continue.
 - Live OpenRouter image generation requires account credits; smoke-test each
   configured model after funding, and record returned usage/cost.
 

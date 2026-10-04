@@ -20,6 +20,7 @@ type CoverTask struct {
 	EpubRelPath           string
 	EbookJSONRelPath      string
 	LocalScanNeeded       bool
+	AIGenerationBlocked   bool
 	RegenerationRequested bool
 	EPUBAuthor            string
 	BookDescription       string
@@ -54,6 +55,7 @@ type BookCoverState struct {
 	AICandidateRelPath    string
 	AICandidateYear       int
 	RegenerationRequested bool
+	AIGenerationBlocked   bool
 	LastCheckedAt         string
 	NextCheckAt           string
 	NoMatchCount          int
@@ -299,25 +301,33 @@ func (d *DB) ClaimNextCoverTask(ctx context.Context, now, leaseUntil string) (Co
 	var task CoverTask
 	err = tx.QueryRowContext(ctx, `SELECT b.id,b.owner_user_id,b.title,b.author,b.source_kind,
 		COALESCE(b.audio_relpath,''),COALESCE(b.epub_relpath,''),COALESCE(b.ebook_json_relpath,''),
-		c.local_scan_needed,
+		c.local_scan_needed,c.ai_generation_blocked,
 		c.regeneration_requested,COALESCE(c.selected_kind,''),COALESCE(c.selected_relpath,''),
 		COALESCE(c.selected_url,''),c.selected_year,COALESCE(c.ai_candidate_relpath,''),
 		c.no_match_count,c.failure_count
 		FROM book_cover_state c JOIN books b ON b.id=c.book_id
-		WHERE b.status IN ('ready','error') AND c.deleting=0 AND c.lookup_paused=0
+		WHERE (
+				(b.status IN ('ready','error') AND NOT EXISTS(
+					SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running')
+				))
+				OR EXISTS(
+					SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.kind='book'
+						AND j.status IN ('queued','running') AND j.stage IN ('transcribing','rate_limited')
+						AND COALESCE(b.audio_relpath,'')<>'' AND b.duration_ms>0
+						AND (b.mode<>'aligned' OR COALESCE(b.ebook_json_relpath,'')<>'')
+				)
+			)
+			AND c.deleting=0 AND c.lookup_paused=0
 			AND (c.regeneration_requested=1 OR c.local_scan_needed=1 OR (c.next_check_at IS NOT NULL AND c.next_check_at<=?))
 			AND (c.lease_until IS NULL OR c.lease_until<=?)
 			AND COALESCE(c.candidate_url,'')='' AND COALESCE(c.candidate_relpath,'')=''
 			AND COALESCE(c.ai_candidate_relpath,'')=''
-			AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running'))
-			AND (b.mode<>'aligned' OR COALESCE(b.epub_relpath,'')<>'' OR NOT EXISTS(
-				SELECT 1 FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running')))
 			AND NOT EXISTS(SELECT 1 FROM admin_book_operations op WHERE op.book_id=b.id
 				AND op.status IN ('queued','running'))
 		ORDER BY c.next_check_at,b.created_at LIMIT 1`, now, now).
 		Scan(&task.BookID, &task.OwnerUserID, &task.Title, &task.Author, &task.SourceKind,
 			&task.AudioRelPath, &task.EpubRelPath, &task.EbookJSONRelPath,
-			&task.LocalScanNeeded, &task.RegenerationRequested, &task.SelectedKind,
+			&task.LocalScanNeeded, &task.AIGenerationBlocked, &task.RegenerationRequested, &task.SelectedKind,
 			&task.SelectedRelPath, &task.SelectedURL, &task.SelectedYear, &task.AICandidateRelPath,
 			&task.NoMatchCount, &task.FailureCount)
 	if err == sql.ErrNoRows {
@@ -406,7 +416,7 @@ func (d *DB) SetCoverCandidate(ctx context.Context, task CoverTask, coverURL, so
 
 func (d *DB) SetCoverRegenerationResults(ctx context.Context, task CoverTask,
 	suggestion *CoverSuggestion, aiRelPath string, aiYear int, checkedAt, nextCheckAt string,
-	lookupResult string,
+	lookupResult string, aiAttempted, aiFailed bool,
 ) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	switch lookupResult {
@@ -428,6 +438,7 @@ func (d *DB) SetCoverRegenerationResults(ctx context.Context, task CoverTask,
 		candidate_kind=?,candidate_relpath=NULL,candidate_url=?,candidate_provider=?,candidate_year=?,
 		ai_candidate_relpath=?,ai_candidate_year=?,
 		regeneration_requested=0,local_scan_needed=0,lookup_paused=0,
+		ai_generation_blocked=CASE WHEN ? THEN ? ELSE ai_generation_blocked END,
 		last_checked_at=?,next_check_at=?,
 		no_match_count=CASE WHEN ?='found' THEN 0 WHEN ?='missing' THEN no_match_count+1 ELSE no_match_count END,
 		failure_count=CASE WHEN ? IN ('found','missing') THEN 0 WHEN ?='failed' THEN failure_count+1 ELSE failure_count END,
@@ -436,7 +447,7 @@ func (d *DB) SetCoverRegenerationResults(ctx context.Context, task CoverTask,
 			AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		candidateKind, aiRelPath, lookupResult,
 		candidateKind, candidateURL, candidateProvider, candidateYear,
-		nullableString(aiRelPath), aiYear, checkedAt, next,
+		nullableString(aiRelPath), aiYear, aiAttempted, aiFailed, checkedAt, next,
 		lookupResult, lookupResult, lookupResult, lookupResult,
 		now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
 	return requireCoverLease(result, err)
@@ -446,9 +457,39 @@ func (d *DB) SetGeneratedCover(ctx context.Context, task CoverTask, relPath stri
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status='selected',selected_kind='ai_image',
 		local_scan_needed=0,selected_relpath=?,selected_url=NULL,selected_provider='OpenRouter image generation',next_check_at=?,
-		lookup_paused=0,lease_until=NULL,updated_at=? WHERE book_id=? AND selected_kind='' AND lease_until=?
+		ai_generation_blocked=0,lookup_paused=0,lease_until=NULL,updated_at=?
+		WHERE book_id=? AND selected_kind='' AND lease_until=?
 		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		relPath, nullableString(nextCheckAt), now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
+	return requireCoverLease(result, err)
+}
+
+// ReserveAIGenerationAttempt persists an at-most-once authorization before
+// dispatching a potentially billable image request. Explicit regeneration may
+// retry a previously blocked book; automatic fallback may not.
+func (d *DB) ReserveAIGenerationAttempt(ctx context.Context, task CoverTask) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET ai_generation_blocked=1,
+		regeneration_requested=0,updated_at=? WHERE book_id=? AND lease_until=?
+		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)
+		AND ((?=1 AND regeneration_requested=1)
+			OR (?=0 AND regeneration_requested=0 AND ai_generation_blocked=0))`,
+		now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID,
+		task.RegenerationRequested, task.RegenerationRequested)
+	return requireCoverLease(result, err)
+}
+
+// SetAIGenerationFailure leaves the attempt blocked. A non-empty next check
+// preserves catalog polling; an empty one disables retry scheduling when
+// catalog lookup is off.
+func (d *DB) SetAIGenerationFailure(ctx context.Context, task CoverTask, nextCheckAt string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET
+		status=CASE WHEN selected_kind='' THEN 'missing' ELSE 'selected' END,
+		ai_generation_blocked=1,regeneration_requested=0,local_scan_needed=0,
+		next_check_at=?,lease_until=NULL,updated_at=? WHERE book_id=? AND lease_until=?
+		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
+		nullableString(nextCheckAt), now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
 	return requireCoverLease(result, err)
 }
 
@@ -458,15 +499,6 @@ func (d *DB) PauseCoverTask(ctx context.Context, task CoverTask) error {
 		local_scan_needed=0,next_check_at=NULL,lease_until=NULL,updated_at=? WHERE book_id=? AND lease_until=?
 		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
 		now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
-	return requireCoverLease(result, err)
-}
-
-func (d *DB) RetryCoverTaskAt(ctx context.Context, task CoverTask, nextCheckAt string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := d.ExecContext(ctx, `UPDATE book_cover_state SET status=CASE WHEN selected_kind='' THEN 'pending' ELSE 'selected' END,
-		local_scan_needed=0,regeneration_requested=0,next_check_at=?,lease_until=NULL,updated_at=? WHERE book_id=? AND lease_until=?
-		AND EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?)`,
-		nextCheckAt, now, task.BookID, task.LeaseUntil, task.BookID, task.OwnerUserID)
 	return requireCoverLease(result, err)
 }
 
@@ -511,14 +543,15 @@ func (d *DB) CoverStateForUser(ctx context.Context, ownerID, bookID string) (Boo
 		COALESCE(c.candidate_kind,''),COALESCE(c.candidate_relpath,''),COALESCE(c.candidate_url,''),
 		COALESCE(c.candidate_provider,''),c.candidate_year,COALESCE(c.ai_candidate_relpath,''),
 		c.ai_candidate_year,c.regeneration_requested,COALESCE(c.last_checked_at,''),
-		COALESCE(c.next_check_at,''),c.no_match_count,c.failure_count,c.lookup_paused
+		COALESCE(c.next_check_at,''),c.no_match_count,c.failure_count,c.lookup_paused,c.ai_generation_blocked
 		FROM book_cover_state c JOIN books b ON b.id=c.book_id
 		WHERE b.owner_user_id=? AND b.id=?`, ownerID, bookID).
 		Scan(&state.Status, &state.SelectedKind, &state.SelectedRelPath, &state.SelectedURL,
 			&state.SelectedProvider, &state.SelectedYear, &state.CandidateKind, &state.CandidateRelPath,
 			&state.CandidateURL, &state.CandidateProvider, &state.CandidateYear, &state.AICandidateRelPath,
 			&state.AICandidateYear, &state.RegenerationRequested,
-			&state.LastCheckedAt, &state.NextCheckAt, &state.NoMatchCount, &state.FailureCount, &paused)
+			&state.LastCheckedAt, &state.NextCheckAt, &state.NoMatchCount, &state.FailureCount,
+			&paused, &state.AIGenerationBlocked)
 	if err != nil {
 		return BookCoverState{}, ErrBookNotFound
 	}

@@ -58,13 +58,17 @@ Implemented first passes:
 - cover state/backfill for all existing books, EPUB-declared covers, supported
   embedded audio artwork, Open Library catalog suggestions, shared lookup
   caching, persisted retry/backoff, and owner-checked local image serving;
+- automatic cover work for manual uploads and paired imports after stable
+  audio/EPUB metadata is published, normally while Groq transcription runs;
 - catalog-cover review that never silently replaces a selected generated
   cover; choosing to keep the generated cover pauses future automatic checks;
 - optional AI-generated raster covers. The admin picker offers OpenAI GPT
   Image 2 by default, ByteDance Seedream 4.5, and Black Forest Labs FLUX.2 Pro.
   Readalong calls OpenRouter's Images API directly with a private server-side
   key, sends bounded book metadata, validates/normalizes raster output, and
-  stores owner-scoped JPEGs; legacy SVG covers remain readable;
+  stores owner-scoped JPEGs; AI generation defaults off, and a persisted
+  at-most-once reservation prevents automatic duplicate image attempts after
+  failures/restarts. Legacy SVG covers remain readable;
 - per-book cover regeneration. The owner can rerun catalog discovery and
   generate a fresh AI candidate while keeping the selected cover, then choose
   the current, catalog, or generated cover;

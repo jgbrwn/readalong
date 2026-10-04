@@ -29,6 +29,10 @@ private.
 - Extract cover artwork from EPUB/audio sources, review catalog cover matches,
   and optionally generate a raster image cover. Regenerate a cover to
   rerun discovery/design and choose between the current, catalog, and AI cover.
+- Queue cover discovery automatically during import; once audio/EPUB metadata
+  is stable, it can run while transcription continues. AI image generation is
+  an administrator-enabled, paid fallback. Catalog lookup defaults on;
+  generated images default off.
 - Search free LibriVox audio on Internet Archive and match it to Project
   Gutenberg text. Prefer source-linked IDs; when IA omits one, show exact
   title/author candidates for the user to verify before import.
@@ -120,7 +124,10 @@ directly from Open Library when visible. Optional AI cover generation sends
 title/author, a verified publication year, and (if enabled) short EPUB
 description metadata to OpenRouter's Images API using the selected image model.
 It sends no chapters, audio, account data, or source URLs and requires a private
-`OPENROUTER_API_KEY` in `.env`.
+`OPENROUTER_API_KEY` in `.env`. The key alone does not enable generation:
+administrators explicitly turn it on in **Admin → Cover artwork**. New imports
+queue the separate cover worker automatically, which can run during Groq
+transcription after source artifacts and EPUB metadata are ready.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/API_AND_SCHEMA.md`](docs/API_AND_SCHEMA.md), and
@@ -142,7 +149,8 @@ contain or inject API credentials. On the VM:
    and route it to port `8000`.
 2. Create `.env` with mode `600` and set `GROQ_API_KEY`,
    `APP_BASE_URL=https://YOUR-VM.exe.xyz`, and either `ADMIN_USER_IDS` or
-   `ADMIN_BOOTSTRAP_EMAILS`:
+   `ADMIN_BOOTSTRAP_EMAILS`. Optionally add `OPENROUTER_API_KEY` for paid AI
+   cover images:
 
    ```sh
    cp .env.example .env
@@ -160,13 +168,20 @@ contain or inject API credentials. On the VM:
    make install-service
    ```
 
+3. For AI covers, sign in as an administrator, open **Admin → Cover artwork**,
+   enable image generation, choose a model, and save. The API key is optional;
+   account credits are needed for image requests. `doctor.sh` reports whether
+   the key is present but does not call OpenRouter or check its balance.
+
 Invite/manage visitors through exe.dev. Every identity that its proxy
 authenticates receives an account automatically; Readalong does not maintain
 an email allowlist.
 
 The app always binds to `127.0.0.1`; `APP_PORT` changes only the port, never the
-bind host. `make install-service` renders the systemd unit for the current user
-and checkout path.
+bind host. `make install-service` installs the system service for the current
+checkout/user and stops the optional Litestream wrapper if it was active. If
+you already have an older `.env`, add the optional `OPENROUTER_API_KEY` line
+manually; bootstrap does not overwrite or merge an existing secrets file.
 
 ### Optional R2 administration and backups
 

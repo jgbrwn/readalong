@@ -184,7 +184,8 @@ CREATE TABLE IF NOT EXISTS book_cover_state (
 	ai_candidate_relpath TEXT, ai_candidate_year INTEGER NOT NULL DEFAULT 0,
 	last_checked_at TEXT, next_check_at TEXT, no_match_count INTEGER NOT NULL DEFAULT 0,
 	failure_count INTEGER NOT NULL DEFAULT 0, lookup_paused INTEGER NOT NULL DEFAULT 0,
-	local_scan_needed INTEGER NOT NULL DEFAULT 1, deleting INTEGER NOT NULL DEFAULT 0,
+	local_scan_needed INTEGER NOT NULL DEFAULT 1, ai_generation_blocked INTEGER NOT NULL DEFAULT 0,
+	deleting INTEGER NOT NULL DEFAULT 0,
 	regeneration_requested INTEGER NOT NULL DEFAULT 0,
 	lease_until TEXT, updated_at TEXT NOT NULL
 );
@@ -218,6 +219,9 @@ CREATE INDEX IF NOT EXISTS admin_book_operations_queue ON admin_book_operations(
 		return err
 	}
 	if err := d.ensureColumn("book_cover_state", "local_scan_needed", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("book_cover_state", "ai_generation_blocked", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := d.ensureColumn("book_cover_state", "ai_candidate_relpath", "TEXT"); err != nil {
@@ -527,7 +531,9 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 			WHERE j.book_id=? AND j.owner_user_id=? AND j.status IN ('queued','running')
 		) AND NOT EXISTS (
 			SELECT 1 FROM admin_book_operations op WHERE op.book_id=? AND op.status IN ('queued','running')
-		)`, jobID, ownerID, bookID, now, now, bookID, ownerID, bookID, ownerID, bookID)
+		) AND NOT EXISTS (
+			SELECT 1 FROM book_cover_state c WHERE c.book_id=? AND c.lease_until>?
+		)`, jobID, ownerID, bookID, now, now, bookID, ownerID, bookID, ownerID, bookID, bookID, now)
 	if err != nil {
 		return err
 	}
@@ -538,15 +544,17 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 	if inserted == 1 {
 		return nil
 	}
-	var exists, ready, active, operationActive, deleting int
+	var exists, ready, active, operationActive, deleting, coverActive int
 	err = d.QueryRowContext(ctx, `SELECT
 		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=?),
 		EXISTS(SELECT 1 FROM books WHERE id=? AND owner_user_id=? AND status='ready'
 			AND COALESCE(audio_relpath,'')<>'' AND COALESCE(transcript_relpath,'')<>''),
 		EXISTS(SELECT 1 FROM jobs WHERE book_id=? AND owner_user_id=? AND status IN ('queued','running')),
 		EXISTS(SELECT 1 FROM admin_book_operations WHERE book_id=? AND status IN ('queued','running')),
-		EXISTS(SELECT 1 FROM book_cover_state WHERE book_id=? AND deleting=1)`,
-		bookID, ownerID, bookID, ownerID, bookID, ownerID, bookID, bookID).Scan(&exists, &ready, &active, &operationActive, &deleting)
+		EXISTS(SELECT 1 FROM book_cover_state WHERE book_id=? AND deleting=1),
+		EXISTS(SELECT 1 FROM book_cover_state WHERE book_id=? AND lease_until>?)`,
+		bookID, ownerID, bookID, ownerID, bookID, ownerID, bookID, bookID, bookID, now).
+		Scan(&exists, &ready, &active, &operationActive, &deleting, &coverActive)
 	if err != nil {
 		return err
 	}
@@ -559,6 +567,8 @@ func (d *DB) QueueRetranscription(ctx context.Context, ownerID, bookID, jobID st
 		return ErrBookOperationInProgress
 	case deleting != 0:
 		return ErrBookDeleteInProgress
+	case coverActive != 0:
+		return ErrBookCoverInProgress
 	case ready == 0:
 		return ErrRetranscriptionNotReady
 	default:
@@ -756,7 +766,10 @@ func (d *DB) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 		COALESCE(error,''),COALESCE(not_before_at,'') FROM jobs
 		WHERE status='queued' AND (not_before_at IS NULL OR not_before_at<=?)
 			AND NOT EXISTS(SELECT 1 FROM book_cover_state c WHERE c.book_id=jobs.book_id AND c.deleting=1)
-		ORDER BY created_at,rowid LIMIT 1`, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
+			AND NOT (jobs.kind='retranscribe' AND EXISTS(
+				SELECT 1 FROM book_cover_state c WHERE c.book_id=jobs.book_id AND c.lease_until>?
+			))
+		ORDER BY created_at,rowid LIMIT 1`, now, now).Scan(&j.ID, &j.OwnerUserID, &j.BookID, &j.Kind, &j.Status,
 		&j.Stage, &j.Progress, &j.Attempt, &j.Error, &j.NotBeforeAt)
 	if err == sql.ErrNoRows {
 		return Job{}, false, nil

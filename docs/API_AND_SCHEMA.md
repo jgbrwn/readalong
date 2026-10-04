@@ -77,11 +77,19 @@ One owner-book row tracks the selected cover, catalog suggestion, generated
 cover suggestion, and any user-triggered regeneration request:
 
 - selected/catalog/AI-candidate artifact paths or catalog URLs and provenance;
-- state (`pending`, `checking`, `missing`, `selected`, or `review`);
+- state (`pending`, `checking`, `missing`, `selected`, `review`, or `error`);
 - last/next check, negative-result count, provider-failure count, lookup pause,
-  regeneration flag, and an expiring lease for the cover worker.
+  regeneration flag, persisted AI-generation block, local-scan flag, and an
+  expiring lease for the cover worker.
 
-Existing books are backfilled on migration; new imports get a pending row.
+Existing books are backfilled on migration; manual uploads and paired imports
+get a pending row in the same transaction as the book and ingestion job. The
+cover worker can run during transcription once stable audio metadata and, for
+aligned books, the parsed EPUB metadata artifact are published. It remains
+blocked during acquisition/normalization and while a retranscription is active.
+The AI-generation block defaults clear when added to older databases because
+historical image-call outcomes were not recorded; later attempts are reserved
+and blocked after failure or restart.
 Generated/EPUB cover files live under the book's owner-scoped directory.
 
 ### cover_lookup_cache
@@ -145,10 +153,12 @@ cache entry.
 
 EPUB-declared raster cover art and supported embedded audiobook artwork are
 normalized locally first. If neither exists, the persistent cover worker
-searches Open Library using only the book title and author. It shares a hashed
-query cache across books/users, sends no user ID/email/audio/EPUB, and limits
-requests to one per second. Catalog artwork is lazy-loaded directly from the
-provider; Readalong does not crawl or bulk-download cover images.
+searches Open Library using only the book title and trusted author metadata.
+It shares a hashed query cache across books/users, sends no user
+ID/email/audio/EPUB, and limits requests to one per second and 100
+uncached/forced search attempts per UTC day. Catalog artwork is lazy-loaded
+directly from the provider; Readalong does not crawl or bulk-download cover
+images.
 
 Negative searches retry after 24 hours, then 7 days, then monthly. Provider
 failures use separate exponential backoff. High-confidence catalog matches can
@@ -169,7 +179,9 @@ environment setting and is never returned to clients. Generation uses
 OpenRouter's Images API; it does not use the exe.dev LLM gateway's text/chat
 routes. `GET /api/admin/cover-ai` returns the fixed picker choices and whether
 the key is configured; `PUT` saves the catalog-lookup switch,
-description-sharing preference, model ID, and image-generation switch.
+description-sharing preference, model ID, and image-generation switch. Fresh
+settings default to catalog lookup and short EPUB-description use on, GPT Image
+2 selected, and AI image generation off, even when a key is configured.
 
 Each request creates one portrait cover image. The prompt includes the
 work's title, author, verified publication year, and optional sanitized EPUB
@@ -177,8 +189,12 @@ description; it sends no chapter text, audio, account data, or source URLs.
 OpenRouter returns base64 raster data, which is bounded, decoded, dimension-
 checked, flattened, and normalized to JPEG before the artifact is atomically
 stored. SVG/HTML, URLs, scripts, and model-authored markup are rejected.
-Requests are not automatically retried after ambiguous provider failures, to
-avoid accidental duplicate charges.
+Before an image request, Readalong durably reserves that book's attempt. A
+failed/ambiguous request or process restart does not automatically dispatch
+another image request; ordinary catalog checks continue. An explicit owner
+Regenerate action authorizes a new attempt. The reservation is at-most-once:
+a crash after reservation but before an image is saved can consume an attempt,
+which the owner can retry manually.
 
 ### Admin book operations
 

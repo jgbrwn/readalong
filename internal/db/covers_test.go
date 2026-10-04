@@ -38,6 +38,226 @@ func TestCoverStateBackfillsExistingBooksAndQueuesNewBooks(t *testing.T) {
 	}
 }
 
+func TestCoverWorkerCanStartDuringInitialIngestionOnceArtifactsAreStable(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "cover-owner", "cover@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "pair-cover", JobID: "pair-cover-job", OwnerUserID: "cover-owner",
+		Title: "Pair Cover", Author: "A Writer", SourceKind: "librivox", GutenbergID: "1234",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextJob(ctx); err != nil || !found {
+		t.Fatalf("pair import job was not claimed: found=%v err=%v", found, err)
+	}
+	assertNoCoverTask := func(bookID string) {
+		t.Helper()
+		if _, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+			now.Add(time.Minute).Format(time.RFC3339)); err != nil || found {
+			t.Fatalf("cover task for %s claimed before its ingestion artifacts were ready: found=%v err=%v", bookID, found, err)
+		}
+	}
+	assertNoCoverTask("pair-cover")
+	if err := d.SetEpubPath(ctx, "pair-cover", "books/cover-owner/pair-cover/source/book.epub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetEbookJSONPath(ctx, "pair-cover", "books/cover-owner/pair-cover/ebook.v1.json.gz"); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCoverTask("pair-cover")
+	if err := d.SetBookMedia(ctx, "pair-cover", "Pair Cover", "A Writer",
+		"books/cover-owner/pair-cover/playback.mp3", 60_000); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCoverTask("pair-cover")
+	if err := d.SetJobProgress(ctx, "pair-cover-job", "transcribing", "transcribing", 0.16); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found || task.BookID != "pair-cover" {
+		t.Fatalf("pair cover task did not start during transcription: task=%#v found=%v err=%v", task, found, err)
+	}
+
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "upload-cover", JobID: "upload-cover-job", OwnerUserID: "cover-owner",
+		Title: "Upload Cover", Author: "A Writer", SourceKind: "upload",
+		AudioRelPath: "books/cover-owner/upload-cover/source/upload.mp3",
+		EpubRelPath:  "books/cover-owner/upload-cover/source/book.epub",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextJob(ctx); err != nil || !found {
+		t.Fatalf("upload job was not claimed: found=%v err=%v", found, err)
+	}
+	if err := d.SetBookMedia(ctx, "upload-cover", "Upload Cover", "A Writer",
+		"books/cover-owner/upload-cover/playback.mp3", 60_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetJobProgress(ctx, "upload-cover-job", "transcribing", "transcribing", 0.16); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCoverTask("upload-cover")
+	if err := d.SetEbookJSONPath(ctx, "upload-cover", "books/cover-owner/upload-cover/ebook.v1.json.gz"); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err = d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found || task.BookID != "upload-cover" {
+		t.Fatalf("aligned upload cover task did not start after EPUB artifacts were published: task=%#v found=%v err=%v", task, found, err)
+	}
+}
+
+func TestCoverWorkerCanClaimAudioOnlyUploadDuringTranscription(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "cover-owner", "cover@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "audio-only-cover", JobID: "audio-only-cover-job", OwnerUserID: "cover-owner",
+		Title: "Audio Only", Author: "A Writer", SourceKind: "upload",
+		AudioRelPath: "books/cover-owner/audio-only-cover/source/upload.mp3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextJob(ctx); err != nil || !found {
+		t.Fatalf("audio upload job was not claimed: found=%v err=%v", found, err)
+	}
+	now := time.Now().UTC()
+	if _, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339)); err != nil || found {
+		t.Fatalf("cover task ran before audio metadata was published: found=%v err=%v", found, err)
+	}
+	if err := d.SetBookMedia(ctx, "audio-only-cover", "Audio Only", "A Writer",
+		"books/cover-owner/audio-only-cover/playback.mp3", 60_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339)); err != nil || found {
+		t.Fatalf("cover task ran before transcription-stage metadata was final: found=%v err=%v", found, err)
+	}
+	if err := d.SetJobProgress(ctx, "audio-only-cover-job", "transcribing", "transcribing", 0.16); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found || task.BookID != "audio-only-cover" {
+		t.Fatalf("audio-only cover task did not run during transcription: task=%#v found=%v err=%v",
+			task, found, err)
+	}
+}
+
+func TestAIImageAttemptReservationSurvivesWorkerRestart(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "cover-owner", "cover@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "reserved-cover", JobID: "reserved-cover-job", OwnerUserID: "cover-owner",
+		Title: "Reserved Cover", SourceKind: "upload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE books SET status='ready',duration_ms=60000,
+		audio_relpath='books/cover-owner/reserved-cover/playback.mp3',
+		transcript_relpath='books/cover-owner/reserved-cover/transcript.v1.json.gz' WHERE id='reserved-cover'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteJob(ctx, "reserved-cover-job"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	task, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found || task.RegenerationRequested {
+		t.Fatalf("automatic cover claim=%#v found=%v err=%v", task, found, err)
+	}
+	if err := d.ReserveAIGenerationAttempt(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a process crash after the durable reservation but before
+	// dispatching the provider request; the expired lease must not reauthorize it.
+	if _, err := d.ExecContext(ctx, `UPDATE book_cover_state SET lease_until=NULL WHERE book_id='reserved-cover'`); err != nil {
+		t.Fatal(err)
+	}
+	replay, found, err := d.ClaimNextCoverTask(ctx, now.Add(time.Second).Format(time.RFC3339),
+		now.Add(2*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !replay.AIGenerationBlocked || replay.RegenerationRequested {
+		t.Fatalf("restart replay claim=%#v found=%v err=%v", replay, found, err)
+	}
+	if err := d.ReserveAIGenerationAttempt(ctx, replay); !errors.Is(err, ErrCoverTaskLeaseLost) {
+		t.Fatalf("automatic replay reauthorized a blocked attempt: %v", err)
+	}
+	_ = d.ReleaseCoverTask(ctx, replay)
+
+	if err := d.QueueCoverRegeneration(ctx, "cover-owner", "reserved-cover"); err != nil {
+		t.Fatal(err)
+	}
+	manual, found, err := d.ClaimNextCoverTask(ctx, now.Add(2*time.Second).Format(time.RFC3339),
+		now.Add(3*time.Minute).Format(time.RFC3339))
+	if err != nil || !found || !manual.RegenerationRequested || !manual.AIGenerationBlocked {
+		t.Fatalf("manual retry authorization=%#v found=%v err=%v", manual, found, err)
+	}
+	if err := d.ReserveAIGenerationAttempt(ctx, manual); err != nil {
+		t.Fatalf("explicit regeneration could not reserve a fresh attempt: %v", err)
+	}
+}
+
+func TestRetranscriptionCannotOverlapAnActiveCoverWorker(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	if _, err := d.UpsertUser(ctx, "cover-owner", "cover@example.org", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateBookAndJob(ctx, NewBook{
+		ID: "cover-lock", JobID: "cover-lock-job", OwnerUserID: "cover-owner",
+		Title: "Cover Lock", SourceKind: "upload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE books SET status='ready',duration_ms=60000,
+		audio_relpath='books/cover-owner/cover-lock/playback.mp3',
+		transcript_relpath='books/cover-owner/cover-lock/transcript.v1.json.gz' WHERE id='cover-lock'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteJob(ctx, "cover-lock-job"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	task, found, err := d.ClaimNextCoverTask(ctx, now.Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339))
+	if err != nil || !found {
+		t.Fatalf("cover task claim=%#v found=%v err=%v", task, found, err)
+	}
+	if err := d.QueueRetranscription(ctx, "cover-owner", "cover-lock", "cover-lock-retranscribe"); !errors.Is(err, ErrBookCoverInProgress) {
+		t.Fatalf("retranscription queued during cover generation: %v", err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO jobs
+		(id,owner_user_id,book_id,kind,status,stage,created_at,updated_at)
+		VALUES('cover-lock-race','cover-owner','cover-lock','retranscribe','queued','retranscribing',?,?)`,
+		now.Format(time.RFC3339), now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.ClaimNextJob(ctx); err != nil || found {
+		t.Fatalf("worker claimed retranscription during cover lease: found=%v err=%v", found, err)
+	}
+	if err := d.ReleaseCoverTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	job, found, err := d.ClaimNextJob(ctx)
+	if err != nil || !found || job.ID != "cover-lock-race" {
+		t.Fatalf("retranscription did not resume after cover lease: job=%#v found=%v err=%v", job, found, err)
+	}
+}
+
 func TestCoverWorkerClaimLeaseAndCandidateChoice(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -119,7 +339,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 		URL:       "https://covers.openlibrary.org/b/id/99-M.jpg",
 		SourceURL: "https://openlibrary.org/works/OL99W", Year: 1935,
 	}, "books/cover-owner/regenerate-book/cover/generated-new.jpg", 1935,
-		now.Format(time.RFC3339), "", "found"); err != nil {
+		now.Format(time.RFC3339), "", "found", false, false); err != nil {
 		t.Fatal(err)
 	}
 	book, err = d.BookForUser(ctx, "cover-owner", "regenerate-book")
@@ -151,7 +371,7 @@ func TestManualCoverRegenerationPreservesSelectionAndOffersBothAlternates(t *tes
 		URL:       "https://covers.openlibrary.org/b/id/100-M.jpg",
 		SourceURL: "https://openlibrary.org/works/OL100W", Year: 1936,
 	}, "books/cover-owner/regenerate-book/cover/generated-newer.svg", 1936,
-		now.Format(time.RFC3339), "", "found"); err != nil {
+		now.Format(time.RFC3339), "", "found", false, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.ChooseCoverCandidate(ctx, "cover-owner", "regenerate-book", "use_candidate"); err != nil {

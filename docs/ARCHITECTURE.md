@@ -94,8 +94,15 @@ On process startup, stale `running` jobs become `queued` again. Every stage is i
 
 Cover reconciliation backfills existing books, claims due work across all
 owners through SQLite leases, and persists provider retry/backoff state.
-Metadata lookups are shared through a hashed title/author cache; the worker
-spaces Open Library requests and never fetches its cover corpus in bulk.
+Manual uploads and paired imports enqueue cover state with their ingestion
+job. Once stable media metadata and (for aligned books) parsed EPUB metadata
+are published, the cover worker runs independently during transcription;
+acquisition and normalization remain protected from premature scans. Metadata
+lookups are shared through a hashed title/author cache; the worker spaces Open
+Library requests and never fetches its cover corpus in bulk. Before a
+potentially billable OpenRouter dispatch, it persists an at-most-once
+per-book attempt reservation; an owner-triggered regeneration is the explicit
+way to authorize another attempt after an uncertain failure.
 
 Admin clone/transfer is a separate persisted operation. It only accepts a
 fully processed, idle book, copies artifacts independently to an owner-scoped

@@ -190,7 +190,7 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 	}
 	if !settings.CatalogLookupEnabled {
 		if task.Title != "" && task.Title != "Untitled" && task.SelectedKind == "" &&
-			settings.Enabled && settings.ModelID != "" {
+			settings.Enabled && settings.ModelID != "" && !task.AIGenerationBlocked {
 			s.generateFallback(ctx, task, settings, 0, "")
 			return
 		}
@@ -234,7 +234,7 @@ func (s *Service) process(ctx context.Context, task db.CoverTask) {
 		_ = s.db.ReleaseCoverTask(ctx, task)
 		return
 	}
-	if !settings.Enabled || settings.ModelID == "" {
+	if !settings.Enabled || settings.ModelID == "" || task.AIGenerationBlocked {
 		_ = s.db.ReleaseCoverTask(ctx, task)
 		return
 	}
@@ -276,37 +276,45 @@ func (s *Service) processRegeneration(ctx context.Context, task db.CoverTask, se
 	}
 
 	aiPath := ""
+	aiAttempted := false
+	aiFailed := false
 	if settings.Enabled && settings.ModelID != "" && task.Title != "" && task.Title != "Untitled" {
 		description := ""
 		if settings.UseBookDescription {
 			description = task.BookDescription
 		}
+		if err := s.db.ReserveAIGenerationAttempt(ctx, task); err != nil {
+			log.Printf("readalong: regenerated image attempt could not be reserved")
+			_ = s.db.ReleaseCoverTask(ctx, task)
+			return
+		}
+		aiAttempted = true
 		image, err := s.models.GenerateCoverImage(ctx, settings.ModelID, coverai.CoverDetails{
 			Title: task.Title, Author: coverPromptAuthor(task), Description: description, Year: aiYear,
 		})
+		if err == nil && (image.Extension != "jpg" || len(image.Bytes) == 0) {
+			err = fmt.Errorf("generated image had an unsupported format")
+		}
 		if err == nil {
-			if image.Extension != "jpg" || len(image.Bytes) == 0 {
-				err = fmt.Errorf("generated image had an unsupported format")
+			filename := filepath.Join(pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID),
+				"cover", fmt.Sprintf("generated-regenerated-%d.jpg", time.Now().UTC().UnixNano()))
+			if writeErr := writeAtomic(filename, image.Bytes); writeErr != nil {
+				err = fmt.Errorf("generated image could not be saved")
+			} else if relative, relErr := filepath.Rel(s.cfg.DataDir, filename); relErr == nil {
+				aiPath = relative
 			} else {
-				filename := filepath.Join(pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID),
-					"cover", fmt.Sprintf("generated-regenerated-%d.jpg", time.Now().UTC().UnixNano()))
-				if writeErr := writeAtomic(filename, image.Bytes); writeErr != nil {
-					err = fmt.Errorf("generated image could not be saved")
-				} else if relative, relErr := filepath.Rel(s.cfg.DataDir, filename); relErr == nil {
-					aiPath = relative
-				} else {
-					_ = os.Remove(filename)
-					err = fmt.Errorf("generated image path could not be prepared")
-				}
+				_ = os.Remove(filename)
+				err = fmt.Errorf("generated image path could not be prepared")
 			}
 		}
 		if err != nil {
+			aiFailed = true
 			log.Printf("readalong: regenerated image cover failed")
 		}
 	}
 
 	if err := s.db.SetCoverRegenerationResults(ctx, task, suggestion, aiPath, aiYear,
-		now.Format(time.RFC3339), nextCheckAt, lookupResult); err != nil {
+		now.Format(time.RFC3339), nextCheckAt, lookupResult, aiAttempted, aiFailed); err != nil {
 		if aiPath != "" {
 			_ = os.Remove(filepath.Join(s.cfg.DataDir, aiPath))
 		}
@@ -317,6 +325,11 @@ func (s *Service) processRegeneration(ctx context.Context, task db.CoverTask, se
 func (s *Service) generateFallback(ctx context.Context, task db.CoverTask, settings coverai.Settings,
 	year int, nextCheckAt string,
 ) {
+	if err := s.db.ReserveAIGenerationAttempt(ctx, task); err != nil {
+		log.Printf("readalong: generated image attempt could not be reserved")
+		_ = s.db.ReleaseCoverTask(ctx, task)
+		return
+	}
 	description := ""
 	if settings.UseBookDescription {
 		description = task.BookDescription
@@ -326,38 +339,26 @@ func (s *Service) generateFallback(ctx context.Context, task db.CoverTask, setti
 	})
 	if err != nil {
 		log.Printf("readalong: generated cover design failed")
-		if nextCheckAt == "" {
-			_ = s.db.RetryCoverTaskAt(ctx, task, time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339))
-		} else {
-			_ = s.db.ReleaseCoverTask(ctx, task)
-		}
+		_ = s.db.SetAIGenerationFailure(ctx, task, nextCheckAt)
 		return
 	}
 	bookDir := pipeline.BookDirectory(s.cfg.DataDir, task.OwnerUserID, task.BookID)
 	coverDir := filepath.Join(bookDir, "cover")
 	if cover.Extension != "jpg" || len(cover.Bytes) == 0 {
 		log.Printf("readalong: generated image cover had an unsupported format")
-		if nextCheckAt == "" {
-			_ = s.db.RetryCoverTaskAt(ctx, task, time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339))
-		} else {
-			_ = s.db.ReleaseCoverTask(ctx, task)
-		}
+		_ = s.db.SetAIGenerationFailure(ctx, task, nextCheckAt)
 		return
 	}
 	filename := filepath.Join(coverDir, "generated.jpg")
 	if err := writeAtomic(filename, cover.Bytes); err != nil {
 		log.Printf("readalong: generated cover could not be saved")
-		if nextCheckAt == "" {
-			_ = s.db.RetryCoverTaskAt(ctx, task, time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339))
-		} else {
-			_ = s.db.ReleaseCoverTask(ctx, task)
-		}
+		_ = s.db.SetAIGenerationFailure(ctx, task, nextCheckAt)
 		return
 	}
 	relative, err := filepath.Rel(s.cfg.DataDir, filename)
 	if err != nil {
 		_ = os.Remove(filename)
-		_ = s.db.ReleaseCoverTask(ctx, task)
+		_ = s.db.SetAIGenerationFailure(ctx, task, nextCheckAt)
 		return
 	}
 	if err := s.db.SetGeneratedCover(ctx, task, relative, nextCheckAt); err != nil {

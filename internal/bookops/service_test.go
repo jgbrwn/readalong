@@ -77,8 +77,8 @@ func operationFixture(t *testing.T, mode string) (*db.DB, string, db.AdminBookOp
 	}
 	if _, err := database.ExecContext(context.Background(), `INSERT INTO book_cover_state
 		(book_id,status,selected_kind,selected_relpath,selected_provider,ai_candidate_relpath,
-		 ai_candidate_year,lookup_paused,updated_at)
-		VALUES(?,'review','ai_svg',?,'Readalong vector art',?,1935,0,?)`,
+		 ai_candidate_year,ai_generation_blocked,lookup_paused,updated_at)
+		VALUES(?,'review','ai_svg',?,'Readalong vector art',?,1935,1,0,?)`,
 		bookID, rel(coverPath), rel(coverCandidatePath), now); err != nil {
 		database.Close()
 		t.Fatal(err)
@@ -156,6 +156,10 @@ func TestCloneCopiesArtifactsIndependentlyAndKeepsSource(t *testing.T) {
 		!cloned.CoverReviewNeeded {
 		t.Fatalf("cover state was not cloned: %#v", cloned)
 	}
+	coverState, err := database.CoverStateForUser(context.Background(), "target", operation.TargetBookID)
+	if err != nil || !coverState.AIGenerationBlocked {
+		t.Fatalf("clone lost the failed-image attempt block: state=%#v err=%v", coverState, err)
+	}
 	if err := os.WriteFile(targetAudio, []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +200,10 @@ func TestTransferMovesOwnerPathsAndRemovesFormerOwnerDirectory(t *testing.T) {
 		!strings.HasPrefix(transferred.CoverAICandidateURL, "/api/books/"+operation.BookID+"/cover/ai-candidate?v=") ||
 		!transferred.CoverReviewNeeded {
 		t.Fatalf("cover state was not transferred: %#v", transferred)
+	}
+	coverState, err := database.CoverStateForUser(context.Background(), "target", operation.BookID)
+	if err != nil || !coverState.AIGenerationBlocked {
+		t.Fatalf("transfer lost the failed-image attempt block: state=%#v err=%v", coverState, err)
 	}
 	if _, err := os.Stat(sourceDir); !os.IsNotExist(err) {
 		t.Fatalf("former owner files were not removed: %v", err)

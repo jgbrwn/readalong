@@ -25,6 +25,7 @@ Path(destination).write_text(text)
 PY
 sudo install -o root -g root -m 0644 "$unit" /etc/systemd/system/readalong.service
 sudo systemctl daemon-reload
+sudo systemctl disable --now readalong-with-litestream.service 2>/dev/null || true
 sudo systemctl enable readalong.service
 if sudo systemctl is-active --quiet readalong.service; then
   sudo systemctl restart readalong.service

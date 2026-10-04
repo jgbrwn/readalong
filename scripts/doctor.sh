@@ -9,6 +9,11 @@ if [[ -x .tools/bin/deno ]]; then echo "[OK] deno: $PWD/.tools/bin/deno"; elif c
 check go; check python3
 [[ -w data ]] && echo "[OK] data writable" || { echo "[FAIL] data not writable"; fail=1; }
 if [[ -f .env ]] && grep -Eq '^GROQ_API_KEY=.+$' .env; then echo "[OK] GROQ_API_KEY appears configured"; else echo "[WARN] GROQ_API_KEY not configured in .env"; fi
+if [[ -f .env ]] && grep -Eq '^OPENROUTER_API_KEY=.+$' .env; then
+  echo "[INFO] OPENROUTER_API_KEY is present; AI covers still require admin opt-in and account credits"
+else
+  echo "[INFO] OPENROUTER_API_KEY is not set (optional; OpenRouter image covers are unavailable)"
+fi
 if [[ -f .env ]]; then
   mode=$(stat -c '%a' .env)
   if (( (8#$mode & 077) == 0 )); then echo "[OK] .env permissions: $mode"; else echo "[FAIL] .env is accessible by group/others ($mode); run chmod 600 .env"; fail=1; fi

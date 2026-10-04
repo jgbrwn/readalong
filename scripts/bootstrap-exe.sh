@@ -27,4 +27,6 @@ chmod 750 data
 if [[ ! -f .env ]]; then cp .env.example .env; chmod 600 .env; fi
 chmod 600 .env
 
-echo "Bootstrap complete. Configure GROQ_API_KEY and ADMIN_BOOTSTRAP_EMAILS in .env, then run ./scripts/doctor.sh"
+echo "Bootstrap complete. Configure GROQ_API_KEY and ADMIN_BOOTSTRAP_EMAILS in .env."
+echo "OPENROUTER_API_KEY is optional for paid AI cover images; setting it does not enable generation."
+echo "Then run ./scripts/doctor.sh."
